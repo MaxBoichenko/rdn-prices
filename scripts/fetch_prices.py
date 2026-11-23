@@ -37,7 +37,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "docs" / "data"
 
 ENTSOE_URL = "https://web-api.tp.entsoe.eu/api"
-OREE_URL = "https://www.oree.com.ua/index.php/pricectr/data_view"
 NBU_URL = "https://bank.gov.ua/NBUStatService/v1/statdirectory/exchange"
 
 CET = ZoneInfo("Europe/Budapest")   # CET/CEST — время торгов SDAC
@@ -322,6 +321,146 @@ def fetch_energy_charts(zone: str, d0: date, d1: date) -> dict[datetime, float]:
     return to_hourly(series)
 
 
+# ---------------------------------------------------------------- биржи (резерв для пропусков)
+# Используются только для дней, которых нет в ENTSO-E. Цены те же самые: сверка 30 случайных
+# часов с биржами показала совпадение до цента.
+
+OKTE_URL = "https://isot.okte.sk/api/v1/dam/results"
+HUPX_URL = "https://labs.hupx.hu/data/v1/dam_aggregated_trading_data_15min"
+OPCOM_URL = "https://www.opcom.ro/grafice-ip-raportPIP-si-volumTranzactionat/ro"
+BNR_YEAR_URL = "https://curs.bnr.ro/files/xml/years/nbrfxrates{y}.xml"
+BNR_LAST_URL = "https://curs.bnr.ro/nbrfxrates10days.xml"
+
+
+def _iso_z(x: str) -> datetime:
+    return datetime.fromisoformat(x.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def parse_okte(rows: list) -> dict[datetime, float]:
+    """OKTE (Словакия): [{deliveryStart, deliveryEnd, price}] -> часовые цены, EUR."""
+    series: dict[str, dict[datetime, float]] = defaultdict(dict)
+    for x in rows or []:
+        if x.get("price") is None or not x.get("deliveryStart"):
+            continue
+        a, b = _iso_z(x["deliveryStart"]), _iso_z(x.get("deliveryEnd") or x["deliveryStart"])
+        res = "PT15M" if (b - a) == timedelta(minutes=15) else "PT60M"
+        series[res][a] = float(x["price"])
+    return to_hourly(series)
+
+
+def fetch_okte(d0: date, d1: date) -> dict[datetime, float]:
+    r = http("GET", OKTE_URL, params={"deliveryDayFrom": d0.isoformat(), "deliveryDayTo": d1.isoformat()})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return parse_okte(r.json())
+
+
+def parse_hupx(js: dict, region: str = "HU") -> dict[datetime, float]:
+    """HUPX Labs: {data:[{DeliveryDay, ProductQH, Price, Region}]} -> часовые цены, EUR.
+    ProductQH — номер четверти часа от полуночи по CET (в дни перехода их 92 или 100)."""
+    q: dict[datetime, float] = {}
+    for x in (js or {}).get("data") or []:
+        if x.get("Region") != region or x.get("Price") is None:
+            continue
+        day = date.fromisoformat(x["DeliveryDay"][:10])
+        start = datetime(day.year, day.month, day.day, tzinfo=CET).astimezone(timezone.utc)
+        q[start + timedelta(minutes=15 * (int(x["ProductQH"]) - 1))] = float(x["Price"])
+    return to_hourly({"PT15M": q})
+
+
+def fetch_hupx(d0: date, d1: date) -> dict[datetime, float]:
+    flt = f"DeliveryDay__gte__{d0.isoformat()},DeliveryDay__lte__{d1.isoformat()},Region__in__HU"
+    r = http("GET", HUPX_URL, params={"filter": flt},
+             headers={"Accept": "application/json", "Referer": "https://labs.hupx.hu/view/DAM_Aggregated_Trading_Data_15min_v1"})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
+    return parse_hupx(r.json())
+
+
+_bnr: dict[str, float] = {}
+
+
+def _load_bnr(url: str) -> None:
+    r = http("GET", url)
+    if r.status_code != 200:
+        return
+    for day, body in re.findall(r'<Cube date="([\d-]+)">(.*?)</Cube>', r.text, flags=re.S):
+        m = re.search(r'<Rate currency="EUR">([\d.]+)</Rate>', body)
+        if m:
+            _bnr[day] = float(m.group(1))
+
+
+def bnr_eur_rate(d: date) -> float:
+    """Курс Нацбанка Румынии RON за 1 EUR, установленный в последний рабочий день до d."""
+    for back in range(1, 8):
+        day = (d - timedelta(days=back)).isoformat()
+        if day in _bnr:
+            return _bnr[day]
+    for url in {BNR_YEAR_URL.format(y=d.year), BNR_YEAR_URL.format(y=(d - timedelta(days=7)).year), BNR_LAST_URL}:
+        if url not in _bnr_loaded:
+            _bnr_loaded.add(url)
+            try:
+                _load_bnr(url)
+            except Exception as e:  # noqa: BLE001
+                log(f"    НБР: {e}")
+    for back in range(1, 8):
+        day = (d - timedelta(days=back)).isoformat()
+        if day in _bnr:
+            return _bnr[day]
+    raise RuntimeError(f"НБР: нет курса EUR перед {d}")
+
+
+_bnr_loaded: set[str] = set()
+
+
+def parse_opcom(html: str, d: date) -> dict[datetime, float]:
+    """OPCOM «Rezultate PZU RO»: строки «Romania <интервал> <цена, лей>» за сутки d (CET).
+    Возвращает {UTC-интервал: цена в леях} с шагом 15 или 60 минут."""
+    text = unescape(re.sub(r"<[^>]+>", " ", html))
+    rows = [(int(n), float(p.replace(".", "").replace(",", ".")))
+            for n, p in re.findall(r"Romania\s+(\d+)\s+(-?[\d.]+,\d+)", text)]
+    if not rows:
+        return {}
+    n = max(k for k, _ in rows)
+    step = 15 if n >= 90 else 60
+    start = datetime(d.year, d.month, d.day, tzinfo=CET).astimezone(timezone.utc)
+    return {start + timedelta(minutes=step * (k - 1)): v for k, v in rows}
+
+
+def fetch_opcom_day(d: date) -> dict[datetime, float]:
+    """Цены PZU Румынии за сутки d в EUR (леи OPCOM / курс НБР). Часовые."""
+    sess = requests.Session()
+    sess.headers["User-Agent"] = "Mozilla/5.0 (rdn-prices-bot)"
+    g = sess.get(OPCOM_URL, timeout=60)
+    tok = re.search(r'name="_token"\s+value="([^"]+)"', g.text) or re.search(r'value="([^"]+)"\s+name="_token"', g.text)
+    if not tok:
+        raise RuntimeError("OPCOM: не найден _token формы")
+    r = sess.post(OPCOM_URL, timeout=60, data={"_token": tok.group(1), "trading_for": d.strftime("%d/%m/%Y"),
+                                               "buton": "Refresh", "action": "trading_for", "limba": "ro"})
+    lei = parse_opcom(r.text, d)
+    if not lei:
+        return {}
+    rate = bnr_eur_rate(d)
+    step = min(b - a for a, b in zip(sorted(lei), sorted(lei)[1:])) if len(lei) > 1 else timedelta(hours=1)
+    res = "PT15M" if step == timedelta(minutes=15) else "PT60M"
+    return to_hourly({res: {t: v / rate for t, v in lei.items()}})
+
+
+def fetch_exchange(zone: str, d0: date, d1: date) -> tuple[dict[datetime, float], str]:
+    if zone == "SK":
+        return fetch_okte(d0, d1), "OKTE"
+    if zone == "HU":
+        return fetch_hupx(d0, d1), "HUPX"
+    if zone == "RO":
+        out: dict[datetime, float] = {}
+        d = d0
+        while d <= d1:
+            out.update(fetch_opcom_day(d))
+            d += timedelta(days=1)
+        return out, "OPCOM (леи → € по курсу НБР)"
+    return {}, ""
+
+
 # ---------------------------------------------------------------- НБУ
 
 _nbu_cache: dict[date, float] = {}
@@ -356,55 +495,116 @@ def _to_float(s: str) -> float | None:
         return None
 
 
-def parse_oree_html(html: str) -> dict[int, float]:
-    """Таблица ОРЕЕ: строки 'Година | Ціна, грн/МВт·год | ...'.
-    Возвращает {номер_часа 1..24: цена_грн}."""
-    prices: dict[int, float] = {}
-    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, flags=re.S | re.I):
-        cells = [re.sub(r"<[^>]+>", "", c).strip()
-                 for c in re.findall(r"<t[dh][^>]*>(.*?)</t[dh]>", row, flags=re.S | re.I)]
-        if len(cells) < 2:
-            continue
-        m = re.match(r"^(\d{1,2})(?:\s*[-–:]\s*\d{1,2})?$", cells[0].replace(":00", ""))
-        if not m:
-            continue
-        hour = int(m.group(1))
-        # формат "00-01" -> час 1; формат "1".."24" -> как есть
-        if re.match(r"^\d{1,2}\s*[-–]", cells[0]):
-            hour += 1
-        if not 1 <= hour <= 25:
-            continue
-        price = _to_float(cells[1])
-        if price is not None:
-            prices[hour] = price
-    return prices
+OREE_DSAP_URL = "https://www.oree.com.ua/index.php/IDM_graphs/get_data_for_chart_DSAP"
+UA_DIR = DATA_DIR / "ua_dam"
 
 
-def fetch_oree_day(d: date) -> dict[datetime, float]:
-    r = http("POST", OREE_URL, data={"date": d.strftime("%d.%m.%Y"), "market": "DAM", "zone": "IPS"},
-             headers={"X-Requested-With": "XMLHttpRequest", "Referer": "https://www.oree.com.ua/index.php/pricectr"})
-    text = r.text
+def kyiv_hours(d: date) -> int:
+    a = datetime(d.year, d.month, d.day, tzinfo=KYIV).astimezone(timezone.utc)
+    b = datetime.combine(d + timedelta(days=1), datetime.min.time(), tzinfo=KYIV).astimezone(timezone.utc)
+    return int((b - a).total_seconds() // 3600)
+
+
+def _f(x):
+    try:
+        return None if x in (None, "") else float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_oree_dsap(js: dict, d: date) -> dict[datetime, dict]:
+    """Ответ ОРЕЕ «Попит, пропозиція, акцепт та ціна» (IDM_graphs/get_data_for_chart_DSAP).
+    Массивы содержат подряд часы предыдущих суток и суток d (по Киеву).
+    Возвращает {UTC-час: {"price": грн/МВт·ч, "buy": МВт·ч, "sell": МВт·ч, "accepted": МВт·ч}}."""
+    price = js.get("price") or []
+    total = len(price)
+    if not total:
+        return {}
+    n_prev = 25 if kyiv_hours(d - timedelta(days=1)) == 25 else 24   # ОРЕЕ даёт 24 значения и в весенние сутки
+    idx = list(range(n_prev, total))
+    exp = kyiv_hours(d)
+    if exp == 23 and len(idx) == 24:
+        idx.pop(3)                       # весенний переход: часа 03:00–04:00 нет
+    if len(idx) != exp:
+        log(f"    ОРЕЕ {d}: неожиданная длина ответа {total} (ожидалось {n_prev}+{exp})")
+        return {}
+    start = datetime(d.year, d.month, d.day, tzinfo=KYIV).astimezone(timezone.utc)
+    out = {}
+    for i, j in enumerate(idx):
+        row = {k: _f((js.get(src) or [None] * total)[j]) for k, src in
+               (("price", "price"), ("buy", "buy"), ("sell", "sell"), ("accepted", "accepted_volume"))}
+        out[start + timedelta(hours=i)] = row
+    # ОРЕЕ отдаёт нули, когда данных за день ещё нет
+    if all(not r["price"] and not r["accepted"] for r in out.values()):
+        return {}
+    return out
+
+
+def fetch_oree_dsap(d: date) -> dict[datetime, dict]:
+    r = http("POST", OREE_DSAP_URL, data={"date": d.strftime("%d.%m.%Y"), "shopping_area": "OES", "market": "DAM"},
+             headers={"X-Requested-With": "XMLHttpRequest", "Referer": "https://www.oree.com.ua/index.php/IDM_graphs"})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}")
     try:
         js = r.json()
-        if isinstance(js, dict):
-            text = js.get("content") or js.get("html") or js.get("data") or json.dumps(js, ensure_ascii=False)
     except ValueError:
-        pass
-    by_hour = parse_oree_html(text)
-    if not by_hour:
-        plain = unescape(re.sub(r"<[^>]+>", " ", text))
-        snippet = re.sub(r"\s+", " ", plain).strip()[:400]
-        log(f"    ОРЕЕ: HTTP {r.status_code}, {len(text)} байт; текст ответа: {snippet}")
+        raise RuntimeError("ответ не JSON: " + re.sub(r"\s+", " ", r.text)[:200])
+    return parse_oree_dsap(js, d)
+
+
+def load_ua_month(key: str) -> dict:
+    p = UA_DIR / f"{key}.json"
+    if p.exists():
+        return json.loads(p.read_text(encoding="utf-8"))
+    return {"month": key, "tz": "UTC", "source": "ОРЕЕ, РДН, ОЕС України",
+            "units": {"price": "UAH/MWh", "buy": "MWh", "sell": "MWh", "accepted": "MWh"},
+            "price": {}, "buy": {}, "sell": {}, "accepted": {}}
+
+
+def save_ua_dam(rows: dict[datetime, dict]) -> int:
+    UA_DIR.mkdir(parents=True, exist_ok=True)
+    by_m: dict[str, dict[datetime, dict]] = defaultdict(dict)
+    for t, r in rows.items():
+        by_m[month_key(t)][t] = r
+    changed = 0
+    for key, rs in by_m.items():
+        doc = load_ua_month(key)
+        for t, r in rs.items():
+            for k in ("price", "buy", "sell", "accepted"):
+                if r.get(k) is not None and doc[k].get(iso(t)) != r[k]:
+                    doc[k][iso(t)] = r[k]
+                    changed += 1
+        for k in ("price", "buy", "sell", "accepted"):
+            doc[k] = dict(sorted(doc[k].items()))
+        (UA_DIR / f"{key}.json").write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    return changed
+
+
+def ua_stored_hours(d: date) -> int:
+    s = datetime(d.year, d.month, d.day, tzinfo=KYIV).astimezone(timezone.utc)
+    e = s + timedelta(hours=kyiv_hours(d))
+    keys = {month_key(s), month_key(e - timedelta(hours=1))}
+    n = 0
+    for k in keys:
+        acc = load_ua_month(k)["accepted"]
+        n += sum(1 for x in acc if s <= _ts(x) < e)
+    return n
+
+
+def ua_prices_eur(d: date) -> dict[datetime, float]:
+    """Цены РДН Украины из сохранённых данных ОРЕЕ, в EUR по курсу НБУ на дату поставки."""
+    s = datetime(d.year, d.month, d.day, tzinfo=KYIV).astimezone(timezone.utc)
+    e = s + timedelta(hours=kyiv_hours(d))
+    out = {}
+    for k in {month_key(s), month_key(e - timedelta(hours=1))}:
+        for x, v in load_ua_month(k)["price"].items():
+            t = _ts(x)
+            if s <= t < e and v:
+                out[t] = v
+    if not out:
         return {}
     rate = nbu_eur_rate(d)
-    out = {}
-    midnight = datetime(d.year, d.month, d.day, tzinfo=KYIV)
-    for h, uah in sorted(by_hour.items()):
-        # час N = интервал (N-1):00–N:00 по Киеву; переход на летнее/зимнее время
-        # учитываем через UTC-арифметику
-        t_utc = (midnight.astimezone(timezone.utc) + timedelta(hours=h - 1))
-        out[t_utc] = round(uah / rate, 2)
-    return out
+    return {t: round(v / rate, 2) for t, v in out.items()}
 
 
 # ---------------------------------------------------------------- хранилище
@@ -450,6 +650,7 @@ def write_meta(sources: dict[str, str], changed: bool) -> None:
     """meta.json: время обновления, месяцы с ценами/перетоками, последние данные, источники."""
     months = sorted(p.stem for p in DATA_DIR.glob("????-??.json"))
     flow_months = sorted(p.stem for p in (DATA_DIR / "flows").glob("????-??.json")) if (DATA_DIR / "flows").exists() else []
+    ua_months = sorted(p.stem for p in UA_DIR.glob("????-??.json")) if UA_DIR.exists() else []
     last: dict[str, str] = {}
     for key in reversed(months):
         for zone, vals in load_month(key)["prices"].items():
@@ -467,6 +668,7 @@ def write_meta(sources: dict[str, str], changed: bool) -> None:
             "months": months,
             "last": last,
             "flow_months": flow_months,
+            "ua_dam_months": ua_months,
             "flow_last": flow_last,
             "borders": [f"{a}-{b}" for a, b in BORDERS],
             "sources": {**meta.get("sources", {}), **sources},
@@ -485,6 +687,7 @@ def main():
     ap.add_argument("--no-flows", action="store_true", help="не загружать перетоки")
     ap.add_argument("--only-flows", action="store_true", help="загрузить только перетоки")
     ap.add_argument("--budget", type=float, default=95, help="лимит времени работы, минут")
+    ap.add_argument("--no-ua-volumes", action="store_true", help="не загружать объёмы РДН Украины (ОРЕЕ)")
     args = ap.parse_args()
     deadline = time.monotonic() + args.budget * 60
 
@@ -531,6 +734,49 @@ def main():
                 sources[z] = "ENTSO-E Transparency Platform"
 
     changed = save(result, sources)
+
+    # Украина: почасовые объёмы РДН (спрос, предложение, акцепт) и цены в грн — с сайта ОРЕЕ.
+    # Ежедневно: последние 7 суток и завтра; при загрузке истории — только недостающие сутки.
+    ua_changed = 0
+    if "UA" in zones and not args.no_ua_volumes:
+        u0 = d0 if args.start else today - timedelta(days=7)
+        u1 = min(d1, today + timedelta(days=1))
+        days = []
+        d = u0
+        while d <= u1:
+            if args.start is None or d >= today - timedelta(days=2) or ua_stored_hours(d) < kyiv_hours(d):
+                days.append(d)
+            d += timedelta(days=1)
+        if days:
+            log(f"[UA] ОРЕЕ объёмы: суток к загрузке {len(days)}")
+
+        def run_ua(day):
+            if time.monotonic() > deadline - 25 * 60:
+                return day, None, "время"
+            try:
+                return day, fetch_oree_dsap(day), None
+            except Exception as e:  # noqa: BLE001
+                return day, None, e
+
+        rows: dict[datetime, dict] = {}
+        empty_days, err_days, late = [], [], 0
+        with ThreadPoolExecutor(4) as ex:
+            for day, res, err in ex.map(run_ua, days):
+                if err == "время":
+                    late += 1
+                elif err:
+                    err_days.append(f"{day}: {err}")
+                elif not res:
+                    empty_days.append(str(day))
+                else:
+                    rows.update(res)
+        ua_changed = save_ua_dam(rows)
+        if days:
+            log(f"    получено суток: {len(days) - len(empty_days) - len(err_days) - late}; "
+                f"без данных: {', '.join(empty_days[-10:]) or '—'}"
+                + (f"; ошибки: {'; '.join(err_days[:5])}" if err_days else "")
+                + (f"; не успели (время): {late}" if late else ""))
+        changed += ua_changed
 
     # Дозаполнение пропусков: сутки, где меньше 23 часов, запрашиваем повторно по одному дню.
     # Для Украины, если ENTSO-E не помог, пробуем ОРЕЕ.
@@ -579,6 +825,28 @@ def main():
             exp = int((de - ds).total_seconds() // 3600)
             log(f"    {r0}..{r1}: ENTSO-E дал {len(got)} из {exp} часов")
             filled.update(got)
+        # SK/HU/RO: чего нет в ENTSO-E — берём с сайта биржи (OKTE, HUPX, OPCOM)
+        if z in ("SK", "HU", "RO"):
+            for r0, r1 in ranges:
+                if time.monotonic() > deadline - 15 * 60:
+                    break
+                ds = datetime(r0.year, r0.month, r0.day, tzinfo=tz).astimezone(timezone.utc)
+                de = datetime.combine(r1 + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+                exp = int((de - ds).total_seconds() // 3600)
+                if sum(1 for t in filled if ds <= t < de) >= exp - 1:
+                    continue
+                if z == "RO" and (r1 - r0).days > 31:
+                    log(f"    {r0}..{r1}: OPCOM — слишком длинный отрезок, пропускаю")
+                    continue
+                try:
+                    ex, src = fetch_exchange(z, r0, r1)
+                    ex = {t: round(v, 2) for t, v in ex.items() if ds <= t < de and t not in filled}
+                    log(f"    {r0}..{r1}: {src} дал {len(ex)} часов")
+                    if ex:
+                        filled.update(ex)
+                        sources[z] = f"ENTSO-E Transparency Platform; {src} (пропуски)"
+                except Exception as e:  # noqa: BLE001
+                    log(f"    {r0}..{r1} биржа ОШИБКА: {e}")
         # PL/SK/HU/RO: чего нет в ENTSO-E — пробуем Energy-Charts (Fraunhofer ISE, CC BY 4.0)
         if z in EC_ZONES:
             for r0, r1 in ranges:
@@ -597,17 +865,15 @@ def main():
                         sources[z] = "ENTSO-E Transparency Platform; Energy-Charts (пропуски)"
                 except Exception as e:  # noqa: BLE001
                     log(f"    {r0}..{r1} Energy-Charts ОШИБКА: {e}")
-        # Украина: дни, которых нет и в ENTSO-E, пробуем взять у ОРЕЕ (только последние 14 дней)
+        # Украина: дни, которых нет в ENTSO-E, берём из данных ОРЕЕ (собраны шагом выше)
         if z == "UA":
             for g in gaps:
-                if g < today - timedelta(days=14):
-                    continue
                 ds = datetime(g.year, g.month, g.day, tzinfo=tz).astimezone(timezone.utc)
-                de = datetime.combine(g + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+                de = ds + timedelta(hours=kyiv_hours(g))
                 if sum(1 for t in filled if ds <= t < de) >= 23:
                     continue
                 try:
-                    o = fetch_oree_day(g)
+                    o = ua_prices_eur(g)
                     log(f"    {g}: ОРЕЕ дал {len(o)} часов")
                     if o:
                         filled.update(o)
