@@ -175,16 +175,23 @@ def fetch_entsoe(zone: str, start_utc: datetime, end_utc: datetime, token: str):
             "periodStart": cur.strftime("%Y%m%d%H%M"),
             "periodEnd": nxt.strftime("%Y%m%d%H%M"),
         }
-        r = http("GET", ENTSOE_URL, params=params)
-        if r.status_code == 401:
-            raise RuntimeError("ENTSO-E: неверный токен (401)")
-        if r.status_code == 400 and "Acknowledgement" not in r.text:
-            raise RuntimeError(f"ENTSO-E 400: {r.text[:300]}")
-        series, c = parse_entsoe_a44(r.text)
-        currency = currency or c
-        for t, v in to_hourly(series).items():
-            if start_utc <= t < end_utc:
-                hourly[t] = v
+        try:
+            r = http("GET", ENTSOE_URL, params=params)
+            if r.status_code == 401:
+                raise PermissionError("ENTSO-E: неверный токен (401)")
+            if r.status_code != 200 and "Acknowledgement" not in r.text:
+                snippet = re.sub(r"\s+", " ", r.text)[:300]
+                raise RuntimeError(f"HTTP {r.status_code}: {snippet}")
+            series, c = parse_entsoe_a44(r.text)
+            currency = currency or c
+            for t, v in to_hourly(series).items():
+                if start_utc <= t < end_utc:
+                    hourly[t] = v
+        except PermissionError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            # ошибка одного куска не должна обнулять всю загрузку зоны — пропуск дозаполнится позже
+            log(f"    [{zone}] {cur:%Y-%m-%d}..{nxt:%Y-%m-%d}: ОШИБКА {type(e).__name__}: {str(e)[:300]}")
         cur = nxt
     return hourly, currency
 
@@ -519,30 +526,46 @@ def main():
             d += timedelta(days=1)
         if not gaps:
             continue
-        log(f"[{z}] неполные сутки: {', '.join(str(g) for g in gaps[:40])}{' …' if len(gaps) > 40 else ''}")
+        log(f"[{z}] неполных суток: {len(gaps)} ({gaps[0]} … {gaps[-1]})")
+        # склеиваем соседние дни в отрезки до 31 дня — так меньше запросов
+        ranges = []
+        for g in gaps:
+            if ranges and (g - ranges[-1][1]).days == 1 and (g - ranges[-1][0]).days < 31:
+                ranges[-1][1] = g
+            else:
+                ranges.append([g, g])
         filled: dict[datetime, float] = {}
-        for g in gaps[:120]:
+        for r0, r1 in ranges:
             if time.monotonic() > deadline - 20 * 60:
                 log("    (время: остальные пропуски — в следующем запуске)")
                 break
-            ds = datetime(g.year, g.month, g.day, tzinfo=tz).astimezone(timezone.utc)
-            de = datetime.combine(g + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+            ds = datetime(r0.year, r0.month, r0.day, tzinfo=tz).astimezone(timezone.utc)
+            de = datetime.combine(r1 + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
             got: dict[datetime, float] = {}
             try:
                 got = {t: v for t, v in fetch_zone(z, ds - timedelta(hours=1), de + timedelta(hours=1)).items() if ds <= t < de}
             except Exception as e:  # noqa: BLE001
-                log(f"    {g} ENTSO-E ОШИБКА: {e}")
-            src = "ENTSO-E"
-            if len(got) < 23 and z == "UA":
+                log(f"    {r0}..{r1} ENTSO-E ОШИБКА: {e}")
+            exp = int((de - ds).total_seconds() // 3600)
+            log(f"    {r0}..{r1}: ENTSO-E дал {len(got)} из {exp} часов")
+            filled.update(got)
+        # Украина: дни, которых нет и в ENTSO-E, пробуем взять у ОРЕЕ (только последние 14 дней)
+        if z == "UA":
+            for g in gaps:
+                if g < today - timedelta(days=14):
+                    continue
+                ds = datetime(g.year, g.month, g.day, tzinfo=tz).astimezone(timezone.utc)
+                de = datetime.combine(g + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+                if sum(1 for t in filled if ds <= t < de) >= 23:
+                    continue
                 try:
                     o = fetch_oree_day(g)
-                    if len(o) > len(got):
-                        got, src = o, "ОРЕЕ"
+                    log(f"    {g}: ОРЕЕ дал {len(o)} часов")
+                    if o:
+                        filled.update(o)
                         sources["UA"] = "ENTSO-E Transparency Platform; ОРЕЕ (грн → EUR по курсу НБУ)"
                 except Exception as e:  # noqa: BLE001
                     log(f"    {g} ОРЕЕ ОШИБКА: {e}")
-            log(f"    {g}: получено часов {len(got)} ({src})")
-            filled.update(got)
         if filled:
             changed += save({z: filled}, {})
     log(f"Цены: изменено значений: {changed}")
