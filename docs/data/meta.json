@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-23T18:01:54Z",
+ "updated": "2026-11-23T22:57:13Z",
  "months": [
   "2024-10",
   "2024-11",
@@ -90,7 +90,7 @@
   "RO": "ENTSO-E Transparency Platform",
   "SK": "ENTSO-E Transparency Platform",
   "HU": "ENTSO-E Transparency Platform",
-  "UA": "ENTSO-E Transparency Platform; ОРЕЕ (грн → EUR по курсу НБУ)"
+  "UA": "ENTSO-E Transparency Platform"
  },
  "zones": [
   "PL",
