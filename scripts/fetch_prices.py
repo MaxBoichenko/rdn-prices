@@ -21,7 +21,9 @@ import json
 import os
 import re
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -50,8 +52,17 @@ ZONES = {
     "UA": "10Y1001C--000182",   # ОЭС Украины
 }
 
-UA = requests.Session()
-UA.headers["User-Agent"] = "rdn-prices-bot/1.0 (+github actions)"
+_tls = threading.local()
+
+
+def _session() -> requests.Session:
+    if not hasattr(_tls, "s"):
+        _tls.s = requests.Session()
+        _tls.s.headers["User-Agent"] = "rdn-prices-bot/1.0 (+github actions)"
+    return _tls.s
+
+
+WORKERS = 6   # параллельных запросов к ENTSO-E (лимит платформы — 400 запросов/мин)
 
 
 def log(*a):
@@ -64,7 +75,7 @@ def http(method: str, url: str, retries: int = 3, **kw) -> requests.Response:
     last = None
     for i in range(retries):
         try:
-            r = UA.request(method, url, timeout=60, **kw)
+            r = _session().request(method, url, timeout=90, **kw)
             if r.status_code in (429, 500, 502, 503, 504):
                 raise requests.HTTPError(f"HTTP {r.status_code}")
             return r
@@ -346,6 +357,8 @@ def fetch_oree_day(d: date) -> dict[datetime, float]:
         pass
     by_hour = parse_oree_html(text)
     if not by_hour:
+        snippet = re.sub(r"\s+", " ", text)[:600]
+        log(f"    ОРЕЕ: HTTP {r.status_code}, {r.headers.get('content-type')}, {len(text)} байт; начало ответа: {snippet}")
         return {}
     rate = nbu_eur_rate(d)
     out = {}
@@ -430,7 +443,7 @@ def write_meta(sources: dict[str, str], changed: bool) -> None:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--start", help="первая дата поставки YYYY-MM-DD (по умолчанию: вчера)")
+    ap.add_argument("--start", help="первая дата поставки YYYY-MM-DD (по умолчанию: 7 дней назад)")
     ap.add_argument("--end", help="последняя дата поставки YYYY-MM-DD (по умолчанию: завтра)")
     ap.add_argument("--zones", default=",".join(ZONES))
     ap.add_argument("--no-flows", action="store_true", help="не загружать перетоки")
@@ -442,7 +455,7 @@ def main():
         sys.exit("Нет ENTSOE_TOKEN (секрет репозитория или переменная окружения)")
 
     today = datetime.now(CET).date()
-    d0 = date.fromisoformat(args.start) if args.start else today - timedelta(days=1)
+    d0 = date.fromisoformat(args.start) if args.start else today - timedelta(days=7)
     d1 = date.fromisoformat(args.end) if args.end else today + timedelta(days=1)
     # берём с запасом в сутки в обе стороны — чтобы покрыть сдвиг часовых поясов Киева
     start_utc = datetime(d0.year, d0.month, d0.day, tzinfo=CET).astimezone(timezone.utc) - timedelta(hours=2)
@@ -453,46 +466,80 @@ def main():
     sources: dict[str, str] = {}
     errors = []
 
-    for z in zones:
-        log(f"[{z}] ENTSO-E {d0}..{d1}")
+    def fetch_zone(z: str, s_utc: datetime, e_utc: datetime) -> dict[datetime, float]:
+        series, currency = fetch_entsoe(z, s_utc, e_utc, token)
+        if series and currency and currency.upper() != "EUR":
+            if currency.upper() == "UAH":
+                series = {t: round(v / nbu_eur_rate(t.astimezone(KYIV).date()), 2) for t, v in series.items()}
+            else:
+                raise RuntimeError(f"неожиданная валюта {currency}")
+        return series
+
+    def run_zone(z: str):
         try:
-            series, currency = fetch_entsoe(z, start_utc, end_utc, token)
-            if series and currency and currency.upper() != "EUR":
-                # на случай, если ENTSO-E отдаст цены не в евро (например, UAH)
-                log(f"    валюта {currency}: перевожу в EUR")
-                if currency.upper() == "UAH":
-                    series = {t: round(v / nbu_eur_rate(t.astimezone(KYIV).date()), 2) for t, v in series.items()}
-                else:
-                    raise RuntimeError(f"неожиданная валюта {currency}")
-            log(f"    часов: {len(series)}")
+            return z, fetch_zone(z, start_utc, end_utc), None
+        except Exception as e:  # noqa: BLE001
+            return z, {}, e
+
+    with ThreadPoolExecutor(WORKERS) as ex:
+        for z, series, err in ex.map(run_zone, zones):
+            if err:
+                log(f"[{z}] ENTSO-E {d0}..{d1}: ОШИБКА {err}")
+                errors.append(f"{z}/ENTSO-E: {err}")
+                continue
+            log(f"[{z}] ENTSO-E {d0}..{d1}: часов {len(series)}")
             if series:
                 result[z] = series
                 sources[z] = "ENTSO-E Transparency Platform"
-        except Exception as e:  # noqa: BLE001
-            log(f"    ОШИБКА: {e}")
-            errors.append(f"{z}/ENTSO-E: {e}")
-
-    # Украина: дополняем/подстраховываем данными ОРЕЕ
-    if "UA" in zones:
-        have = result.get("UA", {})
-        d = d0
-        while d <= d1:
-            day_start = datetime(d.year, d.month, d.day, tzinfo=KYIV).astimezone(timezone.utc)
-            n_have = sum(1 for t in have if day_start <= t < day_start + timedelta(hours=25))
-            if n_have < 23:
-                log(f"[UA] ОРЕЕ {d} (в ENTSO-E часов: {n_have})")
-                try:
-                    day = fetch_oree_day(d)
-                    log(f"    часов: {len(day)}")
-                    if day:
-                        result.setdefault("UA", {}).update(day)
-                        sources["UA"] = "ОРЕЕ (грн → EUR по курсу НБУ)"
-                except Exception as e:  # noqa: BLE001
-                    log(f"    ОШИБКА: {e}")
-                    errors.append(f"UA/ОРЕЕ {d}: {e}")
-            d += timedelta(days=1)
 
     changed = save(result, sources)
+
+    # Дозаполнение пропусков: сутки, где меньше 23 часов, запрашиваем повторно по одному дню.
+    # Для Украины, если ENTSO-E не помог, пробуем ОРЕЕ.
+    check_to = min(d1, today if datetime.now(CET).hour < 14 else today + timedelta(days=1))
+    month_keys = []
+    m = date(d0.year, d0.month, 1) - timedelta(days=1)
+    m = date(m.year, m.month, 1)
+    while m <= check_to:
+        month_keys.append(m.strftime("%Y-%m"))
+        m = (m + timedelta(days=32)).replace(day=1)
+    for z in zones:
+        tz = KYIV if z == "UA" else CET
+        per_day: dict[date, int] = defaultdict(int)
+        for key in month_keys:
+            for k in load_month(key)["prices"].get(z, {}):
+                per_day[_ts(k).astimezone(tz).date()] += 1
+        gaps = []
+        d = d0
+        while d <= check_to:
+            if per_day.get(d, 0) < 23:
+                gaps.append(d)
+            d += timedelta(days=1)
+        if not gaps:
+            continue
+        log(f"[{z}] неполные сутки: {', '.join(str(g) for g in gaps[:40])}{' …' if len(gaps) > 40 else ''}")
+        filled: dict[datetime, float] = {}
+        for g in gaps[:120]:
+            ds = datetime(g.year, g.month, g.day, tzinfo=tz).astimezone(timezone.utc)
+            de = datetime.combine(g + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+            got: dict[datetime, float] = {}
+            try:
+                got = {t: v for t, v in fetch_zone(z, ds - timedelta(hours=1), de + timedelta(hours=1)).items() if ds <= t < de}
+            except Exception as e:  # noqa: BLE001
+                log(f"    {g} ENTSO-E ОШИБКА: {e}")
+            src = "ENTSO-E"
+            if len(got) < 23 and z == "UA":
+                try:
+                    o = fetch_oree_day(g)
+                    if len(o) > len(got):
+                        got, src = o, "ОРЕЕ"
+                        sources["UA"] = "ENTSO-E Transparency Platform; ОРЕЕ (грн → EUR по курсу НБУ)"
+                except Exception as e:  # noqa: BLE001
+                    log(f"    {g} ОРЕЕ ОШИБКА: {e}")
+            log(f"    {g}: получено часов {len(got)} ({src})")
+            filled.update(got)
+        if filled:
+            changed += save({z: filled}, {})
     log(f"Цены: изменено значений: {changed}")
 
     # Перетоки: только полные прошедшие сутки (по CET), с запасом 3 дня на поздние публикации
@@ -505,17 +552,24 @@ def main():
             fs = datetime(f0.year, f0.month, f0.day, tzinfo=CET).astimezone(timezone.utc)
             fe = datetime.combine(f1 + timedelta(days=1), datetime.min.time(), tzinfo=CET).astimezone(timezone.utc)
             daily: dict[str, dict[str, float]] = {}
-            for a, b in BORDERS:
-                for frm, to in ((a, b), (b, a)):
-                    try:
-                        h = fetch_flow(frm, to, fs, fe, token)
-                        if h:
-                            daily[f"{frm}>{to}"] = flows_to_daily(h)
-                            n_flow += 1
-                        log(f"[flow] {frm}>{to} {f0}..{f1}: часов {len(h)}")
-                    except Exception as e:  # noqa: BLE001
-                        log(f"[flow] {frm}>{to} ОШИБКА: {e}")
-                        errors.append(f"flow {frm}>{to}: {e}")
+            dirs = [fd for a, b in BORDERS for fd in ((a, b), (b, a))]
+
+            def run_flow(fd):
+                try:
+                    return fd, fetch_flow(fd[0], fd[1], fs, fe, token), None
+                except Exception as e:  # noqa: BLE001
+                    return fd, {}, e
+
+            with ThreadPoolExecutor(WORKERS) as ex:
+                for (frm, to), h, err in ex.map(run_flow, dirs):
+                    if err:
+                        log(f"[flow] {frm}>{to} ОШИБКА: {err}")
+                        errors.append(f"flow {frm}>{to}: {err}")
+                        continue
+                    if h:
+                        daily[f"{frm}>{to}"] = flows_to_daily(h)
+                        n_flow += 1
+                    log(f"[flow] {frm}>{to} {f0}..{f1}: часов {len(h)}")
             f_changed = save_flows(daily)
             log(f"Перетоки: направлений с данными {n_flow}, изменено значений: {f_changed}")
 
