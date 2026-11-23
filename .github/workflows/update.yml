@@ -2,6 +2,8 @@ name: Обновление цен РДН
 
 on:
   schedule:
+    # время в UTC. Результаты SDAC (PL/SK/HU/RO) выходят ~12:45–13:00 CET,
+    # результаты РДН Украины — днём по Киеву. Несколько запусков — на случай задержек.
     - cron: "55 11 * * *"
     - cron: "40 12 * * *"
     - cron: "30 13 * * *"
@@ -46,6 +48,7 @@ jobs:
           python scripts/fetch_prices.py $ARGS
 
       - name: Сохранить данные
+        if: always()
         run: |
           git config user.name  "rdn-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
