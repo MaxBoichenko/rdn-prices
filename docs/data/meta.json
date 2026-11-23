@@ -1,0 +1,54 @@
+{
+ "updated": "2026-11-23T11:50:48Z",
+ "months": [
+  "2026-10",
+  "2026-11"
+ ],
+ "last": {
+  "HU": "2026-11-23T22:00Z",
+  "PL": "2026-11-23T22:00Z",
+  "RO": "2026-11-23T22:00Z",
+  "SK": "2026-11-23T22:00Z",
+  "UA": "2026-11-24T21:00Z"
+ },
+ "flow_months": [
+  "2026-11"
+ ],
+ "flow_last": "2026-11-22",
+ "borders": [
+  "PL-DE",
+  "PL-CZ",
+  "PL-SK",
+  "PL-LT",
+  "PL-SE4",
+  "PL-UA",
+  "SK-CZ",
+  "SK-HU",
+  "SK-UA",
+  "HU-AT",
+  "HU-UA",
+  "HU-RO",
+  "HU-RS",
+  "HU-HR",
+  "HU-SI",
+  "RO-UA",
+  "RO-MD",
+  "RO-BG",
+  "RO-RS",
+  "UA-MD"
+ ],
+ "sources": {
+  "PL": "ENTSO-E Transparency Platform",
+  "RO": "ENTSO-E Transparency Platform",
+  "SK": "ENTSO-E Transparency Platform",
+  "HU": "ENTSO-E Transparency Platform",
+  "UA": "ENTSO-E Transparency Platform"
+ },
+ "zones": [
+  "PL",
+  "RO",
+  "SK",
+  "HU",
+  "UA"
+ ]
+}
