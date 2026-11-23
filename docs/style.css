@@ -106,3 +106,4 @@ td.part{color:var(--ink2)}
 .ghost.xl{background:#1d6f42;border-color:#1d6f42;color:#fff}
 .ghost.xl:hover{background:#185c37}
 .ghost:disabled{opacity:.6;cursor:wait}
+.demo{background:#b3261e;color:#fff;font-weight:650;padding:11px 16px;border-radius:10px;margin-bottom:16px;letter-spacing:.01em}

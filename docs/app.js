@@ -24,6 +24,7 @@ const T = {
     loading: "Загрузка данных…", empty: "Данных пока нет. Они появятся после первого запуска сборщика.",
     noDay: "На эту дату данных нет.", sources: "Источники", wd: ["вс","пн","вт","ср","чт","пт","сб"],
     partial: "неполные сутки",
+    demoBanner: "ДЕМО-РЕЖИМ: все цифры на этой странице выдуманы и сгенерированы для проверки работы сайта. Это не рыночные данные.",
     xlsx: "Excel: все данные", xlsxBusy: "Готовлю файл…",
     tabAnalytics: "Аналитика", twelveTo: "12 месяцев по", anSummary: "Сводные показатели за 12 месяцев",
     anIndex: "Помесячная динамика индексов РДН", anSpread: "Межрыночные спреды Base: Украина − соседи",
@@ -48,6 +49,7 @@ const T = {
     loading: "Loading data…", empty: "No data yet. It will appear after the first collector run.",
     noDay: "No data for this date.", sources: "Sources", wd: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"],
     partial: "incomplete day",
+    demoBanner: "DEMO MODE: all figures on this page are made up to test the site. These are not market data.",
     xlsx: "Excel: all data", xlsxBusy: "Preparing file…",
     tabAnalytics: "Analytics", twelveTo: "12 months to", anSummary: "12-month summary",
     anIndex: "Monthly day-ahead index dynamics", anSpread: "Cross-market Base spreads: Ukraine − neighbours",
@@ -197,6 +199,7 @@ function applyI18n() {
   if (S.meta) {
     const u = new Date(S.meta.updated);
     $("updated").textContent = `${t("updated")} ${u.toLocaleString(S.lang === "ru" ? "ru-RU" : "en-GB", { timeZone: S.tz, dateStyle: "short", timeStyle: "short" })}`;
+    $("demoBanner").textContent = t("demoBanner");
     const src = S.meta.sources || {};
     const byS = {};
     Object.entries(src).forEach(([z, s]) => (byS[s] ||= []).push(z));
@@ -814,13 +817,70 @@ function bind() {
   });
 }
 
+// ---------------------------------------------------------------- DEMO (?demo=1): выдуманные данные, генерируются в браузере
+function buildDemo() {
+  let seed = 42;
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  const gauss = () => { let u = 0, v = 0; while (!u) u = rnd(); while (!v) v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  const base = { PL: 98, SK: 106, HU: 112, RO: 115, UA: 122 };
+  const now = Date.now();
+  const tomorrowEnd = localMidnight(addDays(localDateOf(now, "Europe/Budapest"), 2), "Europe/Budapest");
+  const nd = new Date(now);
+  const from = Date.UTC(nd.getUTCFullYear() - 2, nd.getUTCMonth(), 1);
+  const months = {};
+  let shock = 0;
+  for (let ms = from; ms < tomorrowEnd; ms += 3600e3) {
+    const d = new Date(ms), k = isoKey(ms), m = k.slice(0, 7);
+    const doy = (ms - Date.UTC(d.getUTCFullYear(), 0, 1)) / 864e5;
+    const h = parts(ms, "Europe/Budapest").h;
+    const wd = parts(ms, "Europe/Budapest"); const dow = new Date(Date.UTC(wd.y, wd.m - 1, wd.d)).getUTCDay();
+    const seas = 1 + .28 * Math.cos((doy - 15) / 365 * 2 * Math.PI);
+    const solar = (1.6 - seas) * 55 * Math.exp(-((h - 13) ** 2) / 6);
+    const shape = 30 * Math.exp(-((h - 19) ** 2) / 5) + 14 * Math.exp(-((h - 8) ** 2) / 3) - solar;
+    if (h === 0) shock = gauss() * 14;
+    const wkend = dow === 0 || dow === 6 ? -14 : 0;
+    const yearTrend = (d.getUTCFullYear() - 2025) * -6;
+    for (const [z, b] of Object.entries(base)) {
+      if (z === "UA" && ms >= tomorrowEnd - 24 * 3600e3) continue;   // Украина «ещё не опубликована» на завтра
+      const k2 = z === "HU" || z === "RO" ? 1.25 : z === "UA" ? .8 : 1;
+      let v = b * seas + shape * k2 + shock + wkend + yearTrend + gauss() * 7;
+      if (z === "UA") v = Math.min(v, 205);                           // «прайс-кэп»
+      ((months[m] ||= {})[z] ||= {})[k] = Math.round(v * 100) / 100;
+    }
+  }
+  // перетоки: суточные суммы MWh
+  const fmean = { "HU>UA": 9000, "UA>HU": 1500, "SK>UA": 7000, "UA>SK": 1200, "PL>UA": 3500, "UA>PL": 800, "RO>UA": 4000, "UA>RO": 2500,
+    "UA>MD": 6000, "MD>UA": 900, "DE>PL": 20000, "PL>DE": 8000, "CZ>PL": 6000, "PL>CZ": 3000, "SK>HU": 25000, "HU>SK": 3000, "CZ>SK": 15000,
+    "SK>CZ": 4000, "AT>HU": 12000, "HU>AT": 3000, "HU>RO": 8000, "RO>HU": 7000, "RO>BG": 6000, "BG>RO": 8000, "RS>HU": 5000, "HU>RS": 4000,
+    "RO>MD": 5000, "PL>LT": 3000, "LT>PL": 2000, "SE4>PL": 9000, "HR>HU": 3000, "HU>HR": 4000, "SI>HU": 1500, "HU>SI": 2500 };
+  const flows = {};
+  const lastFlowDay = addDays(localDateOf(now, "Europe/Budapest"), -1);
+  for (let d = new Date(from).toISOString().slice(0, 10); d <= lastFlowDay; d = addDays(d, 1)) {
+    const n = Date.parse(d) / 864e5;
+    for (const [key, mean] of Object.entries(fmean))
+      ((flows[d.slice(0, 7)] ||= {})[key] ||= {})[d] = Math.max(0, Math.round((mean * (1 + .3 * Math.sin(n / 40)) + gauss() * mean * .2) * 10) / 10);
+  }
+  const ms = Object.keys(months).sort();
+  const last = {}; Object.keys(base).forEach(z => { last[z] = Object.keys(months[ms[ms.length - 1]][z] || months[ms[ms.length - 2]][z]).sort().pop(); });
+  S.months = months; S.flows = flows;
+  return { updated: new Date().toISOString(), months: ms, flow_months: Object.keys(flows).sort(), last, demo: true,
+    borders: ["PL-DE","PL-CZ","PL-SK","PL-LT","PL-SE4","PL-UA","SK-CZ","SK-HU","SK-UA","HU-AT","HU-UA","HU-RO","HU-RS","HU-HR","HU-SI","RO-UA","RO-MD","RO-BG","RO-RS","UA-MD"],
+    sources: Object.fromEntries(Object.keys(base).map(z => [z, "DEMO"])) };
+}
+
 async function init() {
   bind();
   status(t("loading"));
-  try {
-    S.meta = await getJSON("data/meta.json");
-  } catch {
-    S.meta = { months: [], last: {}, sources: {} };
+  const isDemo = new URLSearchParams(location.search).has("demo");
+  if (isDemo) {
+    S.meta = buildDemo();
+    $("demoBanner").classList.remove("hidden");
+  } else {
+    try {
+      S.meta = await getJSON("data/meta.json");
+    } catch {
+      S.meta = { months: [], last: {}, sources: {} };
+    }
   }
   applyI18n();
   const params = new URLSearchParams(location.search);
