@@ -541,15 +541,23 @@ def parse_oree_dsap(js: dict, d: date) -> dict[datetime, dict]:
 
 
 def fetch_oree_dsap(d: date) -> dict[datetime, dict]:
-    r = http("POST", OREE_DSAP_URL, data={"date": d.strftime("%d.%m.%Y"), "shopping_area": "OES", "market": "DAM"},
-             headers={"X-Requested-With": "XMLHttpRequest", "Referer": "https://www.oree.com.ua/index.php/IDM_graphs"})
-    if r.status_code != 200:
-        raise RuntimeError(f"HTTP {r.status_code}")
-    try:
-        js = r.json()
-    except ValueError:
-        raise RuntimeError("ответ не JSON: " + re.sub(r"\s+", " ", r.text)[:200])
-    return parse_oree_dsap(js, d)
+    """ОРЕЕ при частых запросах иногда отдаёт HTML-страницу вместо данных — тогда ждём и повторяем."""
+    last = None
+    for attempt in range(4):
+        time.sleep(0.7 if attempt == 0 else 10 * attempt)
+        r = http("POST", OREE_DSAP_URL, data={"date": d.strftime("%d.%m.%Y"), "shopping_area": "OES", "market": "DAM"},
+                 headers={"X-Requested-With": "XMLHttpRequest", "Accept": "application/json, text/javascript, */*; q=0.01",
+                          "Referer": "https://www.oree.com.ua/index.php/IDM_graphs"})
+        if r.status_code != 200:
+            last = f"HTTP {r.status_code}"
+            continue
+        try:
+            js = r.json()
+        except ValueError:
+            last = "ответ не JSON (сайт ограничил частоту запросов)"
+            continue
+        return parse_oree_dsap(js, d)
+    raise RuntimeError(last)
 
 
 def load_ua_month(key: str) -> dict:
@@ -760,7 +768,7 @@ def main():
 
         rows: dict[datetime, dict] = {}
         empty_days, err_days, late = [], [], 0
-        with ThreadPoolExecutor(4) as ex:
+        with ThreadPoolExecutor(2) as ex:
             for day, res, err in ex.map(run_ua, days):
                 if err == "время":
                     late += 1
@@ -774,7 +782,7 @@ def main():
         if days:
             log(f"    получено суток: {len(days) - len(empty_days) - len(err_days) - late}; "
                 f"без данных: {', '.join(empty_days[-10:]) or '—'}"
-                + (f"; ошибки: {'; '.join(err_days[:5])}" if err_days else "")
+                + (f"; ошибки ({len(err_days)}): {'; '.join(e[:120] for e in err_days[:3])}" if err_days else "")
                 + (f"; не успели (время): {late}" if late else ""))
         changed += ua_changed
 
