@@ -196,7 +196,7 @@ function applyI18n() {
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.title = `${t("title")} · PL RO SK HU UA`;
   segOn("langSeg", "lang", S.lang); segOn("tzSeg", "tz", S.tz);
-  if (S.meta) {
+  if (S.meta && S.meta.updated) {
     const u = new Date(S.meta.updated);
     $("updated").textContent = `${t("updated")} ${u.toLocaleString(S.lang === "ru" ? "ru-RU" : "en-GB", { timeZone: S.tz, dateStyle: "short", timeStyle: "short" })}`;
     $("demoBanner").textContent = t("demoBanner");
