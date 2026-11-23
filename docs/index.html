@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Цены РДН · PL RO SK HU UA</title>
+<meta name="description" content="Цены рынка на сутки вперёд (РДН / day-ahead) Польши, Румынии, Словакии, Венгрии и Украины в EUR/MWh. Обновляется ежедневно.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <div class="logo" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div>
+      <h1 data-i18n="title">Цены РДН</h1>
+      <div class="sub"><span data-i18n="subtitle">Рынок на сутки вперёд · EUR/MWh</span> · <span id="updated" class="muted"></span></div>
+    </div>
+  </div>
+  <div class="switches">
+    <div class="seg" id="tzSeg" role="group" aria-label="timezone">
+      <button data-tz="Europe/Budapest" class="on">CET</button>
+      <button data-tz="Europe/Kyiv" data-i18n="tzKyiv">Киев</button>
+    </div>
+    <div class="seg" id="langSeg" role="group" aria-label="language">
+      <button data-lang="ru" class="on">RU</button>
+      <button data-lang="en">EN</button>
+    </div>
+  </div>
+</header>
+
+<nav class="toolbar">
+  <div class="seg tabs" id="viewSeg">
+    <button data-view="day" class="on" data-i18n="tabDay">День</button>
+    <button data-view="period" data-i18n="tabPeriod">Период</button>
+    <button data-view="analytics" data-i18n="tabAnalytics">Аналитика</button>
+  </div>
+
+  <div class="datebox" id="dayControls">
+    <button class="icon" id="prevDay" aria-label="prev">‹</button>
+    <input type="date" id="dateInput">
+    <button class="icon" id="nextDay" aria-label="next">›</button>
+    <span class="weekday" id="weekday"></span>
+  </div>
+
+  <div class="datebox hidden" id="periodControls">
+    <select id="rangeSel">
+      <option value="30">30</option>
+      <option value="90" selected>90</option>
+      <option value="180">180</option>
+      <option value="365">365</option>
+      <option value="all">∞</option>
+    </select>
+    <span data-i18n="days">дней</span>
+  </div>
+
+  <div class="datebox hidden" id="analyticsControls">
+    <span data-i18n="twelveTo">12 месяцев по</span>
+    <select id="endMonthSel"></select>
+  </div>
+
+  <div class="chips" id="zoneChips"></div>
+
+  <button class="ghost" id="csvBtn" data-i18n="csv">Скачать CSV</button>
+  <button class="ghost xl" id="xlsxBtn" data-i18n="xlsx">Excel: все данные</button>
+</nav>
+
+<main>
+  <div id="status" class="status hidden"></div>
+
+  <!-- ======================= ДЕНЬ ======================= -->
+  <section id="dayView">
+    <div class="kpis" id="kpis"></div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2 data-i18n="hourlyPrices">Почасовые цены</h2>
+        <span class="muted small" id="tzNote"></span>
+      </div>
+      <div class="chartbox tall"><canvas id="dayChart"></canvas></div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="table">Таблица</h2></div>
+        <div class="tablewrap"><table id="hourTable" class="heat"></table></div>
+      </div>
+      <div class="card">
+        <div class="card-h">
+          <h2 data-i18n="spreads">Спреды</h2>
+          <div class="pair">
+            <select id="pairA"></select><span>−</span><select id="pairB"></select>
+          </div>
+        </div>
+        <div class="chartbox"><canvas id="spreadChart"></canvas></div>
+        <div class="spreadsum" id="spreadSum"></div>
+        <h3 data-i18n="baseMatrix">Матрица спредов Base (строка − столбец)</h3>
+        <div class="tablewrap"><table id="spreadMatrix" class="matrix"></table></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================= ПЕРИОД ======================= -->
+  <section id="periodView" class="hidden">
+    <div class="card">
+      <div class="card-h">
+        <h2 data-i18n="dailyBase">Base по дням</h2>
+        <div class="seg small" id="metricSeg">
+          <button data-metric="base" class="on">Base</button>
+          <button data-metric="peak">Peak</button>
+          <button data-metric="offpeak">Off-peak</button>
+        </div>
+      </div>
+      <div class="chartbox tall"><canvas id="periodChart"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="monthly">Средние по месяцам</h2></div>
+      <div class="tablewrap"><table id="monthTable" class="plain"></table></div>
+    </div>
+  </section>
+  <!-- ======================= АНАЛИТИКА ======================= -->
+  <section id="analyticsView" class="hidden">
+    <div class="kpis hl" id="anHighlights"></div>
+
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="anSummary">Сводные показатели за 12 месяцев</h2><span class="muted small" id="anPeriodNote"></span></div>
+      <div class="tablewrap"><table id="anSummary" class="plain summary"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h">
+        <h2 data-i18n="anIndex">Помесячная динамика индексов РДН</h2>
+        <div class="seg small" id="anMetricSeg">
+          <button data-metric="base" class="on">Base</button>
+          <button data-metric="peak">Peak</button>
+          <button data-metric="offpeak">Off-peak</button>
+        </div>
+      </div>
+      <div class="chartbox tall"><canvas id="anIdxChart"></canvas></div>
+      <div class="tablewrap"><table id="anIdxTable" class="plain"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="anSpread">Межрыночные спреды Base: Украина − соседи</h2><span class="muted small" data-i18n="anSpreadNote">€/MWh; «+» — Украина дороже</span></div>
+      <div class="chartbox"><canvas id="anSpreadChart"></canvas></div>
+      <div class="tablewrap"><table id="anSpreadTable" class="plain"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="anFlowsUA">Межгосударственные перетоки Украины</h2><span class="muted small" data-i18n="anFlowsNote">ГВт·ч, физические перетоки; «+» — импорт в Украину, «−» — экспорт</span></div>
+      <div class="chartbox"><canvas id="anFlowChart"></canvas></div>
+      <div class="tablewrap"><table id="anFlowTable" class="plain"></table></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="anBalance">Сальдо экспорта/импорта</h2><span class="muted small" data-i18n="anBalanceNote">ГВт·ч; «+» — нетто-импорт, «−» — нетто-экспорт; по всем границам страны</span></div>
+      <div class="chartbox"><canvas id="anBalChart"></canvas></div>
+      <div class="tablewrap"><table id="anBalTable" class="plain"></table></div>
+    </div>
+    <div id="anFlowStatus" class="status hidden"></div>
+  </section>
+</main>
+
+<footer>
+  <p id="sources"></p>
+  <p class="muted small" data-i18n="footnote">Base — среднее за сутки; Peak — 08:00–20:00 в выбранном часовом поясе; Off-peak — остальные часы. Для рынков с 15-минутным шагом часовая цена — среднее четырёх 15-минутных цен. Цены Украины, полученные в гривне, переведены в евро по официальному курсу НБУ на дату поставки. Информация носит справочный характер.</p>
+</footer>
+
+<script src="vendor/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
