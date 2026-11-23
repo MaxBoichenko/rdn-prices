@@ -71,18 +71,21 @@ def log(*a):
 
 # ---------------------------------------------------------------- HTTP
 
-def http(method: str, url: str, retries: int = 3, **kw) -> requests.Response:
+def http(method: str, url: str, retries: int = 4, **kw) -> requests.Response:
+    """Запрос с повторами при перегрузке сервера (429, любые 5xx, в т.ч. 599 у ENTSO-E)."""
     last = None
     for i in range(retries):
         try:
             r = _session().request(method, url, timeout=90, **kw)
-            if r.status_code in (429, 500, 502, 503, 504):
-                raise requests.HTTPError(f"HTTP {r.status_code}")
+            if r.status_code == 429 or r.status_code >= 500:
+                snippet = re.sub(r"\s+", " ", r.text)[:200]
+                raise requests.HTTPError(f"HTTP {r.status_code}: {snippet}")
             return r
         except Exception as e:  # noqa: BLE001
             last = e
-            time.sleep(3 * (i + 1))
-    raise RuntimeError(f"{url}: {last}")
+            if i < retries - 1:
+                time.sleep(5 * 2 ** i)   # 5, 10, 20 c
+    raise RuntimeError(f"{url.split('?')[0]}: {last}")
 
 
 # ---------------------------------------------------------------- ENTSO-E
@@ -229,6 +232,8 @@ _flow_codes: dict[tuple[str, str], tuple[str, str]] = {}
 
 
 def _entsoe_raw(params: dict, token: str) -> str | None:
+    """Текст ответа; None — если ENTSO-E отверг запрос (неподходящая пара кодов зон).
+    Сбои сервера (5xx) пробрасываются как исключение — это ошибка, а не «нет данных»."""
     r = http("GET", ENTSOE_URL, params={"securityToken": token, **params})
     if r.status_code == 401:
         raise RuntimeError("ENTSO-E: неверный токен (401)")
@@ -292,6 +297,29 @@ def save_flows(daily: dict[str, dict[str, float]]) -> int:
         doc["flows"] = dict(sorted(doc["flows"].items()))
         p.write_text(json.dumps(doc, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     return changed
+
+
+# ---------------------------------------------------------------- Energy-Charts (запасной источник)
+
+EC_URL = "https://api.energy-charts.info/price"
+EC_ZONES = {"PL": "PL", "SK": "SK", "HU": "HU", "RO": "RO"}
+
+
+def fetch_energy_charts(zone: str, d0: date, d1: date) -> dict[datetime, float]:
+    """Цены РДН из Energy-Charts (EUR/MWh), часовые (15-мин усредняются). Без ключа."""
+    r = http("GET", EC_URL, params={"bzn": EC_ZONES[zone], "start": d0.isoformat(), "end": (d1 + timedelta(days=1)).isoformat()})
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+    js = r.json()
+    ts, pr = js.get("unix_seconds") or [], js.get("price") or []
+    if len(ts) < 2:
+        return {}
+    step = min(b - a for a, b in zip(ts, ts[1:]) if b > a)
+    res = {900: "PT15M", 1800: "PT30M", 3600: "PT60M"}.get(step)
+    if not res:
+        return {}
+    series = {res: {datetime.fromtimestamp(t, timezone.utc): float(v) for t, v in zip(ts, pr) if v is not None}}
+    return to_hourly(series)
 
 
 # ---------------------------------------------------------------- НБУ
@@ -359,13 +387,14 @@ def fetch_oree_day(d: date) -> dict[datetime, float]:
     try:
         js = r.json()
         if isinstance(js, dict):
-            text = js.get("html") or js.get("data") or json.dumps(js)
+            text = js.get("content") or js.get("html") or js.get("data") or json.dumps(js, ensure_ascii=False)
     except ValueError:
         pass
     by_hour = parse_oree_html(text)
     if not by_hour:
-        snippet = re.sub(r"\s+", " ", text)[:600]
-        log(f"    ОРЕЕ: HTTP {r.status_code}, {r.headers.get('content-type')}, {len(text)} байт; начало ответа: {snippet}")
+        plain = unescape(re.sub(r"<[^>]+>", " ", text))
+        snippet = re.sub(r"\s+", " ", plain).strip()[:400]
+        log(f"    ОРЕЕ: HTTP {r.status_code}, {len(text)} байт; текст ответа: {snippet}")
         return {}
     rate = nbu_eur_rate(d)
     out = {}
@@ -506,8 +535,9 @@ def main():
     # Дозаполнение пропусков: сутки, где меньше 23 часов, запрашиваем повторно по одному дню.
     # Для Украины, если ENTSO-E не помог, пробуем ОРЕЕ.
     check_to = min(d1, today if datetime.now(CET).hour < 14 else today + timedelta(days=1))
+    g0 = d0 if args.start else today - timedelta(days=120)   # ежедневно проверяем пропуски за 4 месяца
     month_keys = []
-    m = date(d0.year, d0.month, 1) - timedelta(days=1)
+    m = date(g0.year, g0.month, 1) - timedelta(days=1)
     m = date(m.year, m.month, 1)
     while m <= check_to:
         month_keys.append(m.strftime("%Y-%m"))
@@ -519,7 +549,7 @@ def main():
             for k in load_month(key)["prices"].get(z, {}):
                 per_day[_ts(k).astimezone(tz).date()] += 1
         gaps = []
-        d = d0
+        d = g0
         while d <= check_to:
             if per_day.get(d, 0) < 23:
                 gaps.append(d)
@@ -549,6 +579,24 @@ def main():
             exp = int((de - ds).total_seconds() // 3600)
             log(f"    {r0}..{r1}: ENTSO-E дал {len(got)} из {exp} часов")
             filled.update(got)
+        # PL/SK/HU/RO: чего нет в ENTSO-E — пробуем Energy-Charts (Fraunhofer ISE, CC BY 4.0)
+        if z in EC_ZONES:
+            for r0, r1 in ranges:
+                ds = datetime(r0.year, r0.month, r0.day, tzinfo=tz).astimezone(timezone.utc)
+                de = datetime.combine(r1 + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+                exp = int((de - ds).total_seconds() // 3600)
+                have_n = sum(1 for t in filled if ds <= t < de)
+                if have_n >= exp - 1:
+                    continue
+                try:
+                    ec = fetch_energy_charts(z, r0, r1)
+                    ec = {t: v for t, v in ec.items() if ds <= t < de and t not in filled}
+                    log(f"    {r0}..{r1}: Energy-Charts дал {len(ec)} часов")
+                    if ec:
+                        filled.update(ec)
+                        sources[z] = "ENTSO-E Transparency Platform; Energy-Charts (пропуски)"
+                except Exception as e:  # noqa: BLE001
+                    log(f"    {r0}..{r1} Energy-Charts ОШИБКА: {e}")
         # Украина: дни, которых нет и в ENTSO-E, пробуем взять у ОРЕЕ (только последние 14 дней)
         if z == "UA":
             for g in gaps:
@@ -577,7 +625,8 @@ def main():
     n_flow = 0
     stopped = False
     if not args.no_flows:
-        f0 = d0 if args.start else today - timedelta(days=3)
+        f0 = d0 if args.start else today - timedelta(days=120)
+        recent = today - timedelta(days=3)    # последние дни перезапрашиваем всегда (поздние публикации)
         f1 = min(d1, today - timedelta(days=1))
         dirs = [fd for a, b in BORDERS for fd in ((a, b), (b, a))]
         m = date(f0.year, f0.month, 1)
@@ -588,7 +637,8 @@ def main():
             need_days = {(p0 + timedelta(days=i)).isoformat() for i in range((p1 - p0).days + 1)}
             fpath = DATA_DIR / "flows" / f"{p0:%Y-%m}.json"
             have = json.loads(fpath.read_text(encoding="utf-8"))["flows"] if fpath.exists() else {}
-            todo = [fd for fd in dirs if args.start is None or not need_days <= set(have.get(f"{fd[0]}>{fd[1]}", {}))]
+            refresh_all = args.start is None and p1 >= recent
+            todo = [fd for fd in dirs if refresh_all or not need_days <= set(have.get(f"{fd[0]}>{fd[1]}", {}))]
             if not todo:
                 continue
             if time.monotonic() > deadline:
