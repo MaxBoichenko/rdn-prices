@@ -1,5 +1,5 @@
 {
- "updated": "2026-11-23T16:45:44Z",
+ "updated": "2026-11-23T17:38:30Z",
  "months": [
   "2024-10",
   "2024-11",
@@ -87,10 +87,10 @@
  ],
  "sources": {
   "PL": "ENTSO-E Transparency Platform",
-  "RO": "ENTSO-E Transparency Platform",
-  "SK": "ENTSO-E Transparency Platform",
-  "HU": "ENTSO-E Transparency Platform",
-  "UA": "ENTSO-E Transparency Platform"
+  "RO": "ENTSO-E Transparency Platform; OPCOM (леи → € по курсу НБР) (пропуски)",
+  "SK": "ENTSO-E Transparency Platform; OKTE (пропуски)",
+  "HU": "ENTSO-E Transparency Platform; HUPX (пропуски)",
+  "UA": "ENTSO-E Transparency Platform; ОРЕЕ (грн → EUR по курсу НБУ)"
  },
  "zones": [
   "PL",
@@ -98,5 +98,33 @@
   "SK",
   "HU",
   "UA"
+ ],
+ "ua_dam_months": [
+  "2024-10",
+  "2024-11",
+  "2024-12",
+  "2025-01",
+  "2025-02",
+  "2025-03",
+  "2025-04",
+  "2025-05",
+  "2025-06",
+  "2025-07",
+  "2025-08",
+  "2025-09",
+  "2025-10",
+  "2025-11",
+  "2025-12",
+  "2026-01",
+  "2026-02",
+  "2026-03",
+  "2026-04",
+  "2026-05",
+  "2026-06",
+  "2026-07",
+  "2026-08",
+  "2026-09",
+  "2026-10",
+  "2026-11"
  ]
 }
