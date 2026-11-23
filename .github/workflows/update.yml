@@ -57,5 +57,9 @@ jobs:
             echo "Новых данных нет"
           else
             git commit -m "Цены РДН: $(date -u +'%Y-%m-%d %H:%M') UTC"
-            git push
+            # если за время сбора в репозиторий загрузили файлы — подтягиваем их перед отправкой
+            for i in 1 2 3; do
+              git pull --rebase origin main && git push && break
+              sleep 5
+            done
           fi
