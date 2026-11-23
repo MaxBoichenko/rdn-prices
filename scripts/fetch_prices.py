@@ -448,7 +448,9 @@ def main():
     ap.add_argument("--zones", default=",".join(ZONES))
     ap.add_argument("--no-flows", action="store_true", help="не загружать перетоки")
     ap.add_argument("--only-flows", action="store_true", help="загрузить только перетоки")
+    ap.add_argument("--budget", type=float, default=95, help="лимит времени работы, минут")
     args = ap.parse_args()
+    deadline = time.monotonic() + args.budget * 60
 
     token = os.environ.get("ENTSOE_TOKEN", "").strip()
     if not token:
@@ -520,6 +522,9 @@ def main():
         log(f"[{z}] неполные сутки: {', '.join(str(g) for g in gaps[:40])}{' …' if len(gaps) > 40 else ''}")
         filled: dict[datetime, float] = {}
         for g in gaps[:120]:
+            if time.monotonic() > deadline - 20 * 60:
+                log("    (время: остальные пропуски — в следующем запуске)")
+                break
             ds = datetime(g.year, g.month, g.day, tzinfo=tz).astimezone(timezone.utc)
             de = datetime.combine(g + timedelta(days=1), datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
             got: dict[datetime, float] = {}
@@ -542,42 +547,65 @@ def main():
             changed += save({z: filled}, {})
     log(f"Цены: изменено значений: {changed}")
 
-    # Перетоки: только полные прошедшие сутки (по CET), с запасом 3 дня на поздние публикации
+    # Перетоки: только полные прошедшие сутки (по CET), с запасом 3 дня на поздние публикации.
+    # Загружаем и сохраняем помесячно; уже полные месяцы пропускаем — так длинную историю
+    # можно догружать несколькими запусками.
     f_changed = 0
     n_flow = 0
+    stopped = False
     if not args.no_flows:
         f0 = d0 if args.start else today - timedelta(days=3)
         f1 = min(d1, today - timedelta(days=1))
-        if f0 <= f1:
-            fs = datetime(f0.year, f0.month, f0.day, tzinfo=CET).astimezone(timezone.utc)
-            fe = datetime.combine(f1 + timedelta(days=1), datetime.min.time(), tzinfo=CET).astimezone(timezone.utc)
-            daily: dict[str, dict[str, float]] = {}
-            dirs = [fd for a, b in BORDERS for fd in ((a, b), (b, a))]
+        dirs = [fd for a, b in BORDERS for fd in ((a, b), (b, a))]
+        m = date(f0.year, f0.month, 1)
+        while m <= f1:
+            nm = (m + timedelta(days=32)).replace(day=1)
+            p0, p1 = max(m, f0), min(nm - timedelta(days=1), f1)
+            m = nm
+            need_days = {(p0 + timedelta(days=i)).isoformat() for i in range((p1 - p0).days + 1)}
+            fpath = DATA_DIR / "flows" / f"{p0:%Y-%m}.json"
+            have = json.loads(fpath.read_text(encoding="utf-8"))["flows"] if fpath.exists() else {}
+            todo = [fd for fd in dirs if args.start is None or not need_days <= set(have.get(f"{fd[0]}>{fd[1]}", {}))]
+            if not todo:
+                continue
+            if time.monotonic() > deadline:
+                stopped = True
+                break
+            fs = datetime(p0.year, p0.month, p0.day, tzinfo=CET).astimezone(timezone.utc)
+            fe = datetime.combine(p1 + timedelta(days=1), datetime.min.time(), tzinfo=CET).astimezone(timezone.utc)
 
-            def run_flow(fd):
+            def run_flow(fd, fs=fs, fe=fe):
                 try:
                     return fd, fetch_flow(fd[0], fd[1], fs, fe, token), None
                 except Exception as e:  # noqa: BLE001
                     return fd, {}, e
 
+            daily: dict[str, dict[str, float]] = {}
+            empty = []
             with ThreadPoolExecutor(WORKERS) as ex:
-                for (frm, to), h, err in ex.map(run_flow, dirs):
+                for (frm, to), h, err in ex.map(run_flow, todo):
                     if err:
-                        log(f"[flow] {frm}>{to} ОШИБКА: {err}")
-                        errors.append(f"flow {frm}>{to}: {err}")
-                        continue
-                    if h:
+                        log(f"[flow] {frm}>{to} {p0:%Y-%m} ОШИБКА: {err}")
+                        errors.append(f"flow {frm}>{to} {p0:%Y-%m}: {err}")
+                    elif h:
                         daily[f"{frm}>{to}"] = flows_to_daily(h)
-                        n_flow += 1
-                    log(f"[flow] {frm}>{to} {f0}..{f1}: часов {len(h)}")
-            f_changed = save_flows(daily)
-            log(f"Перетоки: направлений с данными {n_flow}, изменено значений: {f_changed}")
+                    else:
+                        empty.append(f"{frm}>{to}")
+            n_flow = max(n_flow, len(daily))
+            c = save_flows(daily)
+            f_changed += c
+            log(f"[flow] {p0}..{p1}: направлений с данными {len(daily)}/{len(todo)}"
+                + (f"; пусто: {', '.join(empty)}" if empty else ""))
+        log(f"Перетоки: изменено значений: {f_changed}")
+        if stopped:
+            log("ВРЕМЯ ЗАПУСКА ЗАКАНЧИВАЕТСЯ: загруженное сохранено. Запустите ещё раз с той же датой — "
+                "готовые месяцы будут пропущены, загрузка продолжится с места остановки.")
 
     write_meta(sources, bool(changed or f_changed))
     if errors:
         log("Ошибки:\n  " + "\n  ".join(errors))
     # падаем только если не получили вообще ничего
-    if not result and not n_flow:
+    if not result and not n_flow and not stopped:
         sys.exit(1)
 
 
