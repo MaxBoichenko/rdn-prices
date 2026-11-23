@@ -24,6 +24,11 @@ const T = {
     loading: "Загрузка данных…", empty: "Данных пока нет. Они появятся после первого запуска сборщика.",
     noDay: "На эту дату данных нет.", sources: "Источники", wd: ["вс","пн","вт","ср","чт","пт","сб"],
     partial: "неполные сутки",
+    uaVol: "Украина: спрос, предложение и акцепт на РДН", uaVolNote: "МВт·ч по часам, ОРЕЕ; линия — цена, €/MWh",
+    anUAVol: "Объёмы торгов РДН Украины", anUAVolNote: "ГВт·ч, ОРЕЕ; линия — Base Украины, €/MWh",
+    sell: "Предложение (SELL)", buy: "Спрос (BUY)", accepted: "Акцепт (объём торгов)", priceEur: "Цена, €/MWh",
+    traded: "Объём торгов", deficitH: "Часов дефицита", surplusH: "Часов профицита", fillRate: "Удовлетворено спроса",
+    avgDay: "В среднем за сутки", mwh: "МВт·ч", gwhU: "ГВт·ч",
     demoBanner: "ДЕМО-РЕЖИМ: все цифры на этой странице выдуманы и сгенерированы для проверки работы сайта. Это не рыночные данные.",
     xlsx: "Excel: все данные", xlsxBusy: "Готовлю файл…",
     tabAnalytics: "Аналитика", twelveTo: "12 месяцев по", anSummary: "Сводные показатели за 12 месяцев",
@@ -49,6 +54,11 @@ const T = {
     loading: "Loading data…", empty: "No data yet. It will appear after the first collector run.",
     noDay: "No data for this date.", sources: "Sources", wd: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"],
     partial: "incomplete day",
+    uaVol: "Ukraine: DAM demand, supply and cleared volume", uaVolNote: "MWh per hour, OREE; line — price, €/MWh",
+    anUAVol: "Ukraine DAM traded volumes", anUAVolNote: "GWh, OREE; line — Ukraine Base, €/MWh",
+    sell: "Supply (SELL)", buy: "Demand (BUY)", accepted: "Cleared (traded volume)", priceEur: "Price, €/MWh",
+    traded: "Traded volume", deficitH: "Deficit hours", surplusH: "Surplus hours", fillRate: "Demand cleared",
+    avgDay: "Daily average", mwh: "MWh", gwhU: "GWh",
     demoBanner: "DEMO MODE: all figures on this page are made up to test the site. These are not market data.",
     xlsx: "Excel: all data", xlsxBusy: "Preparing file…",
     tabAnalytics: "Analytics", twelveTo: "12 months to", anSummary: "12-month summary",
@@ -78,6 +88,7 @@ const S = {
   meta: null,
   months: {},          // "YYYY-MM" -> {zone: {iso: price}}
   flows: {},           // "YYYY-MM" -> {"PL>UA": {day: MWh}}
+  uaDam: {},           // "YYYY-MM" -> {price, buy, sell, accepted: {iso: value}}
   endMonth: null, anMetric: "base",
 };
 const charts = {};
@@ -210,9 +221,14 @@ function applyI18n() {
   fillPairSelects();
 }
 function linkify(s) {
-  if (s.startsWith("ENTSO-E")) return `<a href="https://transparency.entsoe.eu/" target="_blank" rel="noopener">ENTSO-E Transparency Platform</a>`;
-  if (s.startsWith("ОРЕЕ")) return `<a href="https://www.oree.com.ua/" target="_blank" rel="noopener">${S.lang === "ru" ? "ОРЕЕ" : "Market Operator (OREE)"}</a>`;
-  return s;
+  const L = {
+    "ENTSO-E Transparency Platform": "https://transparency.entsoe.eu/", "ОРЕЕ": "https://www.oree.com.ua/", "OKTE": "https://www.okte.sk/",
+    "HUPX": "https://hupx.hu/", "OPCOM": "https://www.opcom.ro/", "Energy-Charts": "https://www.energy-charts.info/",
+  };
+  return s.split("; ").map(part => {
+    for (const [k, url] of Object.entries(L)) if (part.startsWith(k)) return `<a href="${url}" target="_blank" rel="noopener">${k}</a>${part.slice(k.length)}`;
+    return part;
+  }).join(", ");
 }
 function segOn(id, key, val) { document.querySelectorAll(`#${id} button`).forEach(b => b.classList.toggle("on", b.dataset[key] === val)); }
 function renderChips() {
@@ -328,6 +344,65 @@ async function renderDay() {
     }).join("") + "</tr>";
   });
   $("spreadMatrix").innerHTML = mx + "</tbody>";
+  await renderUAVolDay(hours);
+}
+
+
+// ---------------------------------------------------------------- UA volumes (ОРЕЕ)
+async function ensureUAMonths(fromMs, toMs) {
+  const avail = new Set(S.meta.ua_dam_months || []);
+  const need = new Set();
+  for (let ms = fromMs - 86400e3; ms <= toMs + 86400e3; ms += 86400e3 * 27) need.add(new Date(ms).toISOString().slice(0, 7));
+  need.add(new Date(toMs).toISOString().slice(0, 7));
+  await Promise.all([...need].filter(k => avail.has(k) && !S.uaDam[k]).map(async k => { S.uaDam[k] = await getJSON(`data/ua_dam/${k}.json`); }));
+}
+function uaV(field, ms) {
+  const k = isoKey(ms), m = S.uaDam[k.slice(0, 7)];
+  const v = m && m[field] ? m[field][k] : undefined;
+  return v === undefined ? null : v;
+}
+function uaAgg(hours) {
+  const o = { acc: 0, buy: 0, sell: 0, n: 0, def: 0, sur: 0 };
+  hours.forEach(h => {
+    const a = uaV("accepted", h.ms), b = uaV("buy", h.ms), s2 = uaV("sell", h.ms);
+    if (a == null) return;
+    o.n++; o.acc += a; o.buy += b || 0; o.sell += s2 || 0;
+    if (b != null && s2 != null) { if (b > s2) o.def++; else if (s2 > b) o.sur++; }
+  });
+  return o;
+}
+
+async function renderUAVolDay(hours) {
+  const card = $("uaVolCard");
+  if (!S.zones.has("UA") || !(S.meta.ua_dam_months || []).length) { card.classList.add("hidden"); return; }
+  await ensureUAMonths(hours[0].ms, hours[hours.length - 1].ms);
+  const sell = hours.map(h => uaV("sell", h.ms)), buy = hours.map(h => uaV("buy", h.ms)), acc = hours.map(h => uaV("accepted", h.ms));
+  if (!acc.some(v => v != null)) { card.classList.add("hidden"); return; }
+  card.classList.remove("hidden");
+  const a = uaAgg(hours);
+  $("uaVolSum").innerHTML = `
+    <div>${t("traded")}: <b>${nf(a.acc, 1)}</b> ${t("mwh")}</div>
+    <div>${t("sell")}: <b>${nf(a.sell, 1)}</b></div>
+    <div>${t("buy")}: <b>${nf(a.buy, 1)}</b></div>
+    <div>${t("fillRate")}: <b>${a.buy ? nf(a.acc / a.buy * 100, 0) + "%" : "—"}</b></div>
+    <div>${t("deficitH")}: <b>${a.def}</b> · ${t("surplusH")}: <b>${a.sur}</b></div>`;
+  makeChart("uaVolChart", {
+    data: {
+      labels: hours.map(h => h.label),
+      datasets: [
+        ...(hours.some(h => price("UA", h.ms) != null) ? [{ type: "line", label: t("priceEur"), data: hours.map(h => price("UA", h.ms)), yAxisID: "y1",
+          borderColor: ZONES.UA.color, backgroundColor: ZONES.UA.color, borderWidth: 2.2, pointRadius: 0, stepped: "middle", order: 0 }] : []),
+        { type: "bar", label: t("sell"), data: sell, backgroundColor: "rgba(66,133,214,.75)", order: 1 },
+        { type: "bar", label: t("buy"), data: buy, backgroundColor: "rgba(240,128,60,.8)", order: 1 },
+        { type: "bar", label: t("accepted"), data: acc, backgroundColor: "rgba(150,158,170,.6)", order: 1 },
+      ],
+    },
+    options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8 } },
+        tooltip: { callbacks: { label: c => ` ${c.dataset.label}: ${nf(c.parsed.y, c.dataset.yAxisID === "y1" ? 2 : 1)}` } } },
+      scales: { x: gridX, y: { ...gridY, title: { display: true, text: t("mwh") } },
+        y1: { display: hours.some(h => price("UA", h.ms) != null), position: "right", grid: { display: false }, border: { display: false }, title: { display: true, text: "€/MWh" } } } },
+  });
 }
 
 // ---------------------------------------------------------------- PERIOD VIEW
@@ -564,7 +639,33 @@ async function renderAnalytics() {
     return `<td class="${cls(x.avg)}">${x.avg == null ? "—" : sign(x.avg)}</td><td>${x.share == null ? "—" : nf(x.share * 100, 0) + "%"}</td>`; }).join("") + "</tr>";
   $("anSpreadTable").innerHTML = html + "</tbody>";
 
-  S._an = { months, M, SP, F: {}, B: {}, bordersWithData: [] };
+  // --- UA traded volumes (ОРЕЕ)
+  const hasUA = (S.meta.ua_dam_months || []).length > 0;
+  $("anUACard").classList.toggle("hidden", !hasUA);
+  const UV = {};
+  if (hasUA) {
+    await ensureUAMonths(localMidnight(months[0] + "-01", S.tz), localMidnight(addMonths(months[11], 1) + "-01", S.tz));
+    months.forEach(m => { UV[m] = uaAgg(monthHours("UA", m).hours); });
+    makeChart("anUAChart", {
+      data: { labels: months.map(mLabel), datasets: [
+        { type: "line", label: "Base UA, €/MWh", data: months.map(m => M.UA[m].n ? +M.UA[m].base.toFixed(2) : null), yAxisID: "y1",
+          borderColor: ZONES.UA.color, backgroundColor: ZONES.UA.color, borderWidth: 2.2, pointRadius: 3, order: 0 },
+        { type: "bar", label: t("traded"), data: months.map(m => UV[m].n ? +(UV[m].acc / 1000).toFixed(1) : null), backgroundColor: "rgba(150,158,170,.75)", order: 1 },
+      ] },
+      options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+        plugins: { legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 8 } } },
+        scales: { x: gridX, y: { ...gridY, title: { display: true, text: t("gwhU") } },
+          y1: { position: "right", grid: { display: false }, border: { display: false }, title: { display: true, text: "€/MWh" } } } },
+    });
+    html = `<thead><tr><th>${t("month")}</th><th>${t("traded")}, ${t("gwhU")}</th><th>${t("avgDay")}, ${t("mwh")}</th><th>${t("sell")}, ${t("gwhU")}</th><th>${t("buy")}, ${t("gwhU")}</th><th>${t("fillRate")}</th><th>${t("deficitH")}</th><th>${t("surplusH")}</th><th>Base UA</th></tr></thead><tbody>`;
+    const row = (lbl, u, base, days, tot) => `<tr${tot ? ' class="tot"' : ""}><td class="grp">${lbl}</td>${u.n ? `<td><b>${nf(u.acc / 1000, 1)}</b></td><td>${nf(u.acc / Math.max(1, days), 0)}</td><td>${nf(u.sell / 1000, 1)}</td><td>${nf(u.buy / 1000, 1)}</td><td>${u.buy ? nf(u.acc / u.buy * 100, 0) + "%" : "—"}</td><td>${u.def}</td><td>${u.sur}</td>` : "<td>—</td>".repeat(7)}<td>${nf(base)}</td></tr>`;
+    months.slice().reverse().forEach(m => { html += row(mLabel(m), UV[m], M.UA[m].base, UV[m].n / 24); });
+    const tot = months.reduce((o, m) => { const u = UV[m]; ["acc", "buy", "sell", "n", "def", "sur"].forEach(k => o[k] += u[k]); return o; }, { acc: 0, buy: 0, sell: 0, n: 0, def: 0, sur: 0 });
+    html += row(t("total12"), tot, Y.UA.base, tot.n / 24, true);
+    $("anUATable").innerHTML = html + "</tbody>";
+  }
+
+  S._an = { months, M, SP, F: {}, B: {}, bordersWithData: [], UV };
 
   // --- flows
   const hasFlows = months.some(m => S.flows[m] && Object.keys(S.flows[m]).length);
@@ -617,7 +718,7 @@ async function renderAnalytics() {
   html += `<tr class="tot"><td>${t("total12")}</td>${bz.map(c => { const v = B[c].reduce((a, x) => x == null ? a : (a ?? 0) + x, null);
     return `<td class="${cls(v)}">${v == null ? "—" : (v > 0 ? "+" : "") + nf(gwh(v), 1)}</td>`; }).join("")}</tr>`;
   $("anBalTable").innerHTML = html + "</tbody>";
-  S._an = { months, M, SP, F, B, bordersWithData };
+  S._an = { months, M, SP, F, B, bordersWithData, UV };
 }
 
 // ---------------------------------------------------------------- EXCEL (все данные)
@@ -694,6 +795,25 @@ async function exportExcel() {
       add(ru ? "Перетоки и сальдо" : "Flows & balances", bh, [9, ...UA_BORDERS.flatMap(() => [11, 11, 13]), ...BAL_ZONES.map(() => 14)]);
     }
 
+    // UA: объёмы РДН (ОРЕЕ)
+    const um = S.meta.ua_dam_months || [];
+    if (um.length) {
+      await ensureUAMonths(localMidnight(first, S.tz), localMidnight(addDays(last, 1), S.tz));
+      const uh = [[ru ? "Дата" : "Date", ru ? "Час" : "Hour", "UTC", ru ? "Цена, грн/МВт·ч" : "Price, UAH/MWh", ru ? "Цена, €/MWh" : "Price, €/MWh",
+        ru ? "Предложение (SELL), МВт·ч" : "Supply (SELL), MWh", ru ? "Спрос (BUY), МВт·ч" : "Demand (BUY), MWh", ru ? "Акцепт, МВт·ч" : "Cleared, MWh", ru ? "Дефицит(−)/профицит(+), МВт·ч" : "Deficit(−)/surplus(+), MWh"]];
+      dates.forEach(d => dayHours(d, S.tz).forEach(h => {
+        const a = uaV("accepted", h.ms); if (a == null) return;
+        const b = uaV("buy", h.ms), s2 = uaV("sell", h.ms);
+        uh.push([d, h.label, isoKey(h.ms), uaV("price", h.ms), price("UA", h.ms), s2, b, a, s2 != null && b != null ? r2(s2 - b) : null]);
+      }));
+      add(ru ? "UA объёмы (час)" : "UA volumes (hourly)", uh, [11, 8, 18, 13, 11, 15, 15, 12, 16]);
+      const ums = [[ru ? "Месяц" : "Month", ru ? "Объём торгов, ГВт·ч" : "Traded, GWh", ru ? "Предложение, ГВт·ч" : "Supply, GWh", ru ? "Спрос, ГВт·ч" : "Demand, GWh",
+        ru ? "Удовлетворено спроса, %" : "Demand cleared, %", ru ? "Часов дефицита" : "Deficit hours", ru ? "Часов профицита" : "Surplus hours", "Base UA, €/MWh"]];
+      allM.forEach(m => { const u = uaAgg(monthHours("UA", m).hours); if (!u.n) return;
+        ums.push([m, r2(u.acc / 1000), r2(u.sell / 1000), r2(u.buy / 1000), u.buy ? r2(u.acc / u.buy * 100) : null, u.def, u.sur, r2(MS.UA[m].base)]); });
+      add(ru ? "UA объёмы (месяц)" : "UA volumes (monthly)", ums, [9, 14, 14, 12, 14, 12, 12, 12]);
+    }
+
     // 7. Инфо
     const info = ru ? [
       ["Цены РДН: PL, SK, HU, RO, UA"],
@@ -704,6 +824,7 @@ async function exportExcel() {
       ["Base / Peak / Off-peak", "среднее за сутки / 08:00–20:00 / остальные часы (в выбранном часовом поясе)"],
       ["Цены Украины в грн", "переведены в EUR по курсу НБУ на дату поставки"],
       ["Перетоки", "ENTSO-E, фактические физические перетоки; суммы за сутки по CET; сальдо «+» = нетто-импорт"],
+      ["Объёмы РДН Украины", "ОРЕЕ: заявленные спрос (BUY) и предложение (SELL), акцептованный объём (= объём торгов), цена в грн"],
       ["Источники", Object.entries(S.meta.sources || {}).map(([z, s]) => `${z}: ${s}`).join("; ")],
     ] : [
       ["Day-ahead prices: PL, SK, HU, RO, UA"],
@@ -714,6 +835,7 @@ async function exportExcel() {
       ["Base / Peak / Off-peak", "daily average / 08:00–20:00 / other hours (selected time zone)"],
       ["Ukrainian prices in UAH", "converted to EUR at the NBU rate for the delivery date"],
       ["Flows", "ENTSO-E physical flows; daily sums by CET day; net “+” = net import"],
+      ["Ukraine DAM volumes", "OREE: declared demand (BUY) and supply (SELL), cleared volume (= traded volume), price in UAH"],
       ["Sources", Object.entries(S.meta.sources || {}).map(([z, s]) => `${z}: ${s}`).join("; ")],
     ];
     const wsI = XLSX.utils.aoa_to_sheet(info); wsI["!cols"] = [{ wch: 28 }, { wch: 90 }];
@@ -863,7 +985,17 @@ function buildDemo() {
   const ms = Object.keys(months).sort();
   const last = {}; Object.keys(base).forEach(z => { last[z] = Object.keys(months[ms[ms.length - 1]][z] || months[ms[ms.length - 2]][z]).sort().pop(); });
   S.months = months; S.flows = flows;
-  return { updated: new Date().toISOString(), months: ms, flow_months: Object.keys(flows).sort(), last, demo: true,
+  const uaDam = {};
+  for (const [m, zz] of Object.entries(months)) for (const [k, p] of Object.entries(zz.UA || {})) {
+    const h = parts(Date.parse(k), "Europe/Kyiv").h;
+    const dem = 2600 + 1500 * Math.exp(-((h - 19) ** 2) / 10) + 900 * Math.exp(-((h - 9) ** 2) / 8) + gauss() * 150;
+    const sup = 2800 + 1700 * Math.exp(-((h - 12) ** 2) / 12) + gauss() * 180;
+    const o = (uaDam[m] ||= { price: {}, buy: {}, sell: {}, accepted: {} });
+    o.price[k] = Math.round(p * 49.5); o.buy[k] = Math.round(dem * 10) / 10; o.sell[k] = Math.round(sup * 10) / 10;
+    o.accepted[k] = Math.round(Math.min(dem, sup) * (0.9 + rnd() * 0.08) * 10) / 10;
+  }
+  S.uaDam = uaDam;
+  return { updated: new Date().toISOString(), months: ms, flow_months: Object.keys(flows).sort(), ua_dam_months: Object.keys(S.uaDam).sort(), last, demo: true,
     borders: ["PL-DE","PL-CZ","PL-SK","PL-LT","PL-SE4","PL-UA","SK-CZ","SK-HU","SK-UA","HU-AT","HU-UA","HU-RO","HU-RS","HU-HR","HU-SI","RO-UA","RO-MD","RO-BG","RO-RS","UA-MD"],
     sources: Object.fromEntries(Object.keys(base).map(z => [z, "DEMO"])) };
 }
