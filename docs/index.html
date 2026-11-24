@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Цены РДН · PL RO SK HU UA</title>
 <meta name="description" content="Цены рынка на сутки вперёд (РДН / day-ahead) Польши, Румынии, Словакии, Венгрии и Украины в EUR/MWh. Обновляется ежедневно.">
-<link rel="stylesheet" href="style.css?v=5">
+<link rel="stylesheet" href="style.css?v=6">
 </head>
 <body>
 <header class="top">
@@ -33,6 +33,7 @@
     <button data-view="day" class="on" data-i18n="tabDay">День</button>
     <button data-view="period" data-i18n="tabPeriod">Период</button>
     <button data-view="analytics" data-i18n="tabAnalytics">Аналитика</button>
+    <button data-view="premium" data-i18n="tabPremium">Украина дороже</button>
   </div>
 
   <div class="datebox" id="dayControls">
@@ -51,6 +52,11 @@
       <option value="all">∞</option>
     </select>
     <span data-i18n="days">дней</span>
+  </div>
+
+  <div class="datebox hidden" id="premControls">
+    <input type="date" id="premFrom"><span>—</span><input type="date" id="premTo">
+    <label class="thr"><span data-i18n="premThr">дороже на ≥</span> <input type="number" id="premThr" value="0" min="0" step="1"> €</label>
   </div>
 
   <div class="datebox hidden" id="analyticsControls">
@@ -126,6 +132,33 @@
       <div class="tablewrap"><table id="monthTable" class="plain"></table></div>
     </div>
   </section>
+  <!-- ======================= УКРАИНА ДОРОЖЕ ======================= -->
+  <section id="premiumView" class="hidden">
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="premTitle">Часы, когда цена РДН Украины выше, чем во всех выбранных странах</h2>
+        <span class="muted small" id="premNote"></span></div>
+      <div class="kpis hl" id="premKpis"></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="premByHour">По часам суток</h2><span class="muted small" data-i18n="premByHourNote">доля дней, когда в этот час Украина дороже всех</span></div>
+        <div class="chartbox"><canvas id="premHourChart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="premByMonth">По месяцам</h2><span class="muted small" data-i18n="premByMonthNote">число таких часов и средняя премия, €/MWh</span></div>
+        <div class="chartbox"><canvas id="premMonthChart"></canvas></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="premCal">Календарь: день × час</h2><span class="muted small" data-i18n="premCalNote">цвет — на сколько €/MWh Украина дороже самой дорогой из выбранных стран; наведите на ячейку</span></div>
+      <div class="tablewrap calwrap"><table id="premCal" class="cal"></table></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2 data-i18n="premDays">Дни</h2></div>
+      <div class="tablewrap calwrap"><table id="premDays" class="plain"></table></div>
+    </div>
+  </section>
+
   <!-- ======================= АНАЛИТИКА ======================= -->
   <section id="analyticsView" class="hidden">
     <div class="kpis hl" id="anHighlights"></div>
@@ -181,6 +214,6 @@
 </footer>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="app.js?v=6"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>
