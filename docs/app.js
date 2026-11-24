@@ -20,7 +20,7 @@ const T = {
     footnote: "Base — среднее за сутки; Peak — 08:00–20:00 в выбранном часовом поясе; Off-peak — остальные часы. Для рынков с 15-минутным шагом часовая цена — среднее четырёх 15-минутных цен. Цены Украины, полученные в гривне, переведены в евро по официальному курсу НБУ на дату поставки. Информация носит справочный характер.",
     updated: "обновлено", hour: "Час", noData: "нет данных", vsPrev: "к пред. дню", min: "Мин", max: "Макс",
     avg: "Средний", maxSpread: "Макс", minSpread: "Мин", positive: "часов > 0", month: "Месяц",
-    tzNoteCET: "Время: CET/CEST (Будапешт, Варшава, Братислава)", tzNoteKyiv: "Время: Киев / Кишинёв (EET/EEST)",
+    tzNoteCET: "Время: CET/CEST (Будапешт, Варшава, Братислава)", tzNoteKyiv: "Время: Киев (EET/EEST)",
     loading: "Загрузка данных…", empty: "Данных пока нет. Они появятся после первого запуска сборщика.",
     noDay: "На эту дату данных нет.", sources: "Источники", wd: ["вс","пн","вт","ср","чт","пт","сб"],
     partial: "неполные сутки",
@@ -50,7 +50,7 @@ const T = {
     footnote: "Base — daily average; Peak — 08:00–20:00 in the selected time zone; Off-peak — remaining hours. For 15-minute markets the hourly price is the average of four quarter-hour prices. Ukrainian prices published in UAH are converted to EUR at the official NBU rate for the delivery date. For information purposes only.",
     updated: "updated", hour: "Hour", noData: "no data", vsPrev: "vs prev. day", min: "Min", max: "Max",
     avg: "Average", maxSpread: "Max", minSpread: "Min", positive: "hours > 0", month: "Month",
-    tzNoteCET: "Time: CET/CEST (Budapest, Warsaw, Bratislava)", tzNoteKyiv: "Time: Kyiv / Chișinău (EET/EEST)",
+    tzNoteCET: "Time: CET/CEST (Budapest, Warsaw, Bratislava)", tzNoteKyiv: "Time: Kyiv (EET/EEST)",
     loading: "Loading data…", empty: "No data yet. It will appear after the first collector run.",
     noDay: "No data for this date.", sources: "Sources", wd: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"],
     partial: "incomplete day",
@@ -442,18 +442,21 @@ async function renderPeriod() {
       const s = daily[z][i];
       s.vals.forEach((v, j) => {
         if (v == null) return;
-        const o = ((byM[m] ||= {})[z] ||= { all: [0, 0], pk: [0, 0] });
+        const o = ((byM[m] ||= {})[z] ||= { all: [0, 0], pk: [0, 0], op: [0, 0] });
         o.all[0] += v; o.all[1]++;
-        if (s.hours[j].h >= PEAK_FROM && s.hours[j].h < PEAK_TO) { o.pk[0] += v; o.pk[1]++; }
+        const k = s.hours[j].h >= PEAK_FROM && s.hours[j].h < PEAK_TO ? "pk" : "op";
+        o[k][0] += v; o[k][1]++;
       });
     });
   });
   const months = Object.keys(byM).sort().reverse();
-  let html = `<thead><tr><th>${t("month")}</th>${zs.map(z => `<th>${z} Base</th><th>${z} Peak</th>`).join("")}</tr></thead><tbody>`;
+  const avg = a => a[1] ? nf(a[0] / a[1]) : "—";
+  let html = `<thead><tr><th rowspan="2">${t("month")}</th>${zs.map(z => `<th colspan="3" class="grp">${z}</th>`).join("")}</tr>
+    <tr>${zs.map(() => "<th>Base</th><th>Peak</th><th>Off-peak</th>").join("")}</tr></thead><tbody>`;
   months.forEach(m => {
     html += `<tr><td class="grp">${m}</td>` + zs.map(z => {
       const o = byM[m][z];
-      return o ? `<td>${nf(o.all[0] / o.all[1])}</td><td>${o.pk[1] ? nf(o.pk[0] / o.pk[1]) : "—"}</td>` : "<td>—</td><td>—</td>";
+      return o ? `<td><b>${avg(o.all)}</b></td><td>${avg(o.pk)}</td><td>${avg(o.op)}</td>` : "<td>—</td><td>—</td><td>—</td>";
     }).join("") + "</tr>";
   });
   $("monthTable").innerHTML = html + "</tbody>";
@@ -736,7 +739,7 @@ async function exportExcel() {
     if (!first || !last) throw new Error(t("empty"));
     await ensureMonths(localMidnight(first, S.tz), localMidnight(addDays(last, 1), S.tz));
     await ensureFlowMonths(S.meta.flow_months || []);
-    const tzName = S.tz === "Europe/Kyiv" ? (ru ? "Киев/Кишинёв (EET)" : "Kyiv/Chisinau (EET)") : "CET/CEST";
+    const tzName = S.tz === "Europe/Kyiv" ? (ru ? "Киев (EET)" : "Kyiv (EET)") : "CET/CEST";
     const r2 = v => v == null || isNaN(v) ? null : Math.round(v * 100) / 100;
     const wb = XLSX.utils.book_new();
     const add = (name, rows, widths) => {
