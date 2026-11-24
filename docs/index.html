@@ -56,6 +56,10 @@
 
   <div class="datebox hidden" id="premControls">
     <input type="date" id="premFrom"><span>—</span><input type="date" id="premTo">
+    <div class="seg small" id="premModeSeg">
+      <button data-mode="all" class="on" data-i18n="premModeAll">дороже всех</button>
+      <button data-mode="any" data-i18n="premModeAny">хотя бы одной</button>
+    </div>
     <label class="thr"><span data-i18n="premThr">дороже на ≥</span> <input type="number" id="premThr" value="0" min="0" step="1"> €</label>
   </div>
 
@@ -135,7 +139,7 @@
   <!-- ======================= УКРАИНА ДОРОЖЕ ======================= -->
   <section id="premiumView" class="hidden">
     <div class="card">
-      <div class="card-h"><h2 data-i18n="premTitle">Часы, когда цена РДН Украины выше, чем во всех выбранных странах</h2>
+      <div class="card-h"><h2 id="premTitleH">Часы, когда цена РДН Украины выше, чем во всех выбранных странах</h2>
         <span class="muted small" id="premNote"></span></div>
       <div class="kpis hl" id="premKpis"></div>
     </div>
@@ -214,6 +218,6 @@
 </footer>
 
 <script src="vendor/chart.umd.min.js"></script>
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 </body>
 </html>

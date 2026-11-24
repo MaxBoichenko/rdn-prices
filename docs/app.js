@@ -24,6 +24,11 @@ const T = {
     loading: "Загрузка данных…", empty: "Данных пока нет. Они появятся после первого запуска сборщика.",
     noDay: "На эту дату данных нет.", sources: "Источники", wd: ["вс","пн","вт","ср","чт","пт","сб"],
     partial: "неполные сутки",
+    premModeAll: "дороже всех", premModeAny: "хотя бы одной",
+    premTitleAny: "Часы, когда цена РДН Украины выше, чем хотя бы в одной из выбранных стран",
+    premCalNoteAny: "цвет — на сколько €/MWh Украина дороже самой дешёвой из выбранных стран; наведите на ячейку",
+    premByHourNoteAny: "доля дней, когда в этот час Украина дороже хотя бы одной страны",
+    premHoursAny: "Часов, когда Украина дороже хотя бы одной", premCheaper: "Дешевле Украины",
     tabPremium: "Украина дороже", premThr: "дороже на ≥", premTitle: "Часы, когда цена РДН Украины выше, чем во всех выбранных странах",
     premByHour: "По часам суток", premByHourNote: "доля дней, когда в этот час Украина дороже всех",
     premByMonth: "По месяцам", premByMonthNote: "число таких часов и средняя премия, €/MWh",
@@ -62,6 +67,11 @@ const T = {
     loading: "Loading data…", empty: "No data yet. It will appear after the first collector run.",
     noDay: "No data for this date.", sources: "Sources", wd: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"],
     partial: "incomplete day",
+    premModeAll: "above all", premModeAny: "above at least one",
+    premTitleAny: "Hours when Ukraine's day-ahead price is above at least one selected country",
+    premCalNoteAny: "colour — how much Ukraine is above the cheapest selected country, €/MWh; hover a cell",
+    premByHourNoteAny: "share of days when Ukraine is above at least one country at this hour",
+    premHoursAny: "Hours Ukraine is above at least one", premCheaper: "Cheaper than Ukraine",
     tabPremium: "Ukraine higher", premThr: "higher by ≥", premTitle: "Hours when Ukraine's day-ahead price is above all selected countries",
     premByHour: "By hour of day", premByHourNote: "share of days when Ukraine is the highest at this hour",
     premByMonth: "By month", premByMonthNote: "number of such hours and average premium, €/MWh",
@@ -106,7 +116,7 @@ const S = {
   flows: {},           // "YYYY-MM" -> {"PL>UA": {day: MWh}}
   uaDam: {},           // "YYYY-MM" -> {price, buy, sell, accepted: {iso: value}}
   endMonth: null, anMetric: "base",
-  premFrom: null, premTo: null, premThr: 0,
+  premFrom: null, premTo: null, premThr: 0, premMode: "all",
 };
 const charts = {};
 const $ = id => document.getElementById(id);
@@ -887,7 +897,11 @@ async function renderPremium() {
   const dates = []; for (let d = S.premFrom; d <= S.premTo; d = addDays(d, 1)) dates.push(d);
   await ensureMonths(localMidnight(dates[0], S.tz), localMidnight(addDays(dates[dates.length - 1], 1), S.tz));
   status("");
-  const thr = +S.premThr || 0;
+  const thr = +S.premThr || 0, anyMode = S.premMode === "any";
+  segOn("premModeSeg", "mode", S.premMode);
+  $("premTitleH").textContent = anyMode ? t("premTitleAny") : t("premTitle");
+  document.querySelector('[data-i18n="premCalNote"]').textContent = anyMode ? t("premCalNoteAny") : t("premCalNote");
+  document.querySelector('[data-i18n="premByHourNote"]').textContent = anyMode ? t("premByHourNoteAny") : t("premByHourNote");
   $("premNote").textContent = `${t("premVs")}: ${others.map(zname).join(", ")} · ${S.tz === "Europe/Kyiv" ? t("tzNoteKyiv") : t("tzNoteCET")}`;
 
   // расчёт
@@ -898,13 +912,16 @@ async function renderPremium() {
     const r = { d, cells: [], hits: [] };
     dayHours(d, S.tz).forEach(h => {
       const ua = price("UA", h.ms);
-      let mx = null, who = null;
-      others.forEach(z => { const v = price(z, h.ms); if (v != null && (mx == null || v > mx)) { mx = v; who = z; } });
-      if (ua == null || mx == null) { r.cells.push({ h, na: true }); return; }
+      const vals = others.map(z => [z, price(z, h.ms)]).filter(([, v]) => v != null);
+      if (ua == null || !vals.length) { r.cells.push({ h, na: true }); return; }
+      vals.sort((a, b) => b[1] - a[1]);                       // от дорогой к дешёвой
+      const ref = anyMode ? vals[vals.length - 1] : vals[0];  // «хотя бы одной» — к самой дешёвой, «всех» — к самой дорогой
+      const mx = ref[1], who = ref[0];
       const prem = ua - mx, hit = thr > 0 ? prem >= thr : prem > 0;
+      const below = vals.filter(([, v]) => thr > 0 ? ua - v >= thr : ua > v).map(([z]) => z);
       nAll++; byHour[h.h].n++;
       const m = (byMonth[d.slice(0, 7)] ||= { n: 0, hit: 0, sum: 0 }); m.n++;
-      const cell = { h, ua, mx, who, prem, hit };
+      const cell = { h, ua, mx, who, prem, hit, vals, below };
       r.cells.push(cell);
       if (hit) { nHit++; sumP += prem; maxP = maxP == null || prem > maxP.prem ? { prem, d, h } : maxP; byHour[h.h].hit++; m.hit++; m.sum += prem; r.hits.push(cell); }
     });
@@ -914,7 +931,7 @@ async function renderPremium() {
   S._prem = { rows, others };
 
   $("premKpis").innerHTML = [
-    [t("premHours"), nf(nHit, 0), "", `${t("premShare")}: ${nAll ? nf(nHit / nAll * 100, 1) : "—"}%`],
+    [anyMode ? t("premHoursAny") : t("premHours"), nf(nHit, 0), "", `${t("premShare")}: ${nAll ? nf(nHit / nAll * 100, 1) : "—"}%`],
     [t("premDaysN"), nf(daysHit, 0), "", `${S.lang === "ru" ? "из" : "of"} ${rows.length} ${t("premOfDays")}`],
     [t("premAvg"), nHit ? nf(sumP / nHit) : "—", "€/MWh", ""],
     [t("premMax"), maxP ? nf(maxP.prem) : "—", "€/MWh", maxP ? `${maxP.d}, ${maxP.h.label}` : ""],
@@ -951,7 +968,8 @@ async function renderPremium() {
       const cs = byH[i]; if (!cs) return "<td></td>";
       const c = cs.find(x => x.hit) || cs[0];
       if (c.na) return `<td class="na" title="${r.d} ${c.h.label}: ${t("noData")}"></td>`;
-      const tip = `${r.d} ${c.h.label}\nUA: ${nf(c.ua)} €\n${c.who}: ${nf(c.mx)} €\n${c.prem >= 0 ? "+" : ""}${nf(c.prem)} €`;
+      const tip = `${r.d} ${c.h.label}\nUA: ${nf(c.ua)} €\n` + c.vals.map(([z, v]) => `${z}: ${nf(v)} €${c.below.includes(z) ? " ✓" : ""}`).join("\n")
+        + `\n${anyMode ? "UA − min" : "UA − max"} (${c.who}): ${c.prem >= 0 ? "+" : ""}${nf(c.prem)} €`;
       return c.hit ? `<td class="p" style="background:${premColor(c.prem, thr)}" title="${tip}"></td>` : `<td title="${tip}"></td>`;
     }).join("") + "</tr>";
   });
@@ -960,10 +978,10 @@ async function renderPremium() {
   // таблица дней
   const hitRows = rows.filter(r => r.hits.length).reverse();
   if (!hitRows.length) { $("premDays").innerHTML = `<tbody><tr><td class="muted">${t("premNone")}</td></tr></tbody>`; return; }
-  let tb = `<thead><tr><th>${t("premDate")}</th><th>${t("premCount")}</th><th>${t("premAvgShort")}</th><th>${t("premMaxShort")}</th><th style="text-align:left">${t("premHoursList")}</th></tr></thead><tbody>`;
+  let tb = `<thead><tr><th>${t("premDate")}</th><th>${t("premCount")}</th><th>${t("premAvgShort")}</th><th>${t("premMaxShort")}</th><th style="text-align:left">${t("premHoursList")}</th>${anyMode ? `<th style="text-align:left">${t("premCheaper")}</th>` : ""}</tr></thead><tbody>`;
   hitRows.forEach(r => {
     const avg = r.hits.reduce((a, c) => a + c.prem, 0) / r.hits.length, mx = Math.max(...r.hits.map(c => c.prem));
-    tb += `<tr><td class="grp">${r.d} <span class="muted">${weekday(r.d)}</span></td><td>${r.hits.length}</td><td>${nf(avg)}</td><td>${nf(mx)}</td><td class="hrs">${r.hits.map(c => c.h.label).join(", ")}</td></tr>`;
+    tb += `<tr><td class="grp">${r.d} <span class="muted">${weekday(r.d)}</span></td><td>${r.hits.length}</td><td>${nf(avg)}</td><td>${nf(mx)}</td><td class="hrs">${r.hits.map(c => c.h.label).join(", ")}</td>${anyMode ? `<td style="text-align:left">${(() => { const cnt = {}; r.hits.forEach(c => c.below.forEach(z => cnt[z] = (cnt[z] || 0) + 1)); return Object.entries(cnt).sort((a, b) => b[1] - a[1]).map(([z, n]) => `${z} (${n})`).join(", "); })()}</td>` : ""}</tr>`;
   });
   $("premDays").innerHTML = tb + "</tbody>";
 }
@@ -979,9 +997,11 @@ function downloadCSV() {
     name = `rdn_${S.date}.csv`;
   } else if (S.view === "premium" && S._prem) {
     const P = S._prem;
-    rows = [["date", "hour", "utc_start", "UA_EUR_MWh", "max_other_EUR_MWh", "max_other_country", "premium_EUR_MWh", ...P.others.map(z => `${z}_EUR_MWh`)]];
-    P.rows.forEach(r => r.hits.forEach(c => rows.push([r.d, c.h.label, isoKey(c.h.ms), c.ua, c.mx, c.who, c.prem.toFixed(2), ...P.others.map(z => price(z, c.h.ms) ?? "")])));
-    name = `rdn_ua_higher_${S.premFrom}_${S.premTo}.csv`;
+    const any = S.premMode === "any";
+    rows = [["date", "hour", "utc_start", "UA_EUR_MWh", any ? "min_other_EUR_MWh" : "max_other_EUR_MWh", any ? "min_other_country" : "max_other_country",
+      "premium_EUR_MWh", "ua_above", ...P.others.map(z => `${z}_EUR_MWh`)]];
+    P.rows.forEach(r => r.hits.forEach(c => rows.push([r.d, c.h.label, isoKey(c.h.ms), c.ua, c.mx, c.who, c.prem.toFixed(2), c.below.join(" "), ...P.others.map(z => price(z, c.h.ms) ?? "")])));
+    name = `rdn_ua_higher_${S.premMode}_${S.premFrom}_${S.premTo}.csv`;
   } else if (S.view === "analytics" && S._an) {
     const A = S._an;
     rows = [["section", "month", ...ORDER.flatMap(z => [`${z}_base`, `${z}_peak`, `${z}_offpeak`])]];
@@ -1047,6 +1067,7 @@ function bind() {
   $("metricSeg").onclick = e => { const v = e.target.dataset.metric; if (!v) return; S.metric = v; segOn("metricSeg", "metric", v); render(); };
   $("premFrom").onchange = e => { if (e.target.value) { S.premFrom = e.target.value; if (S.premFrom > S.premTo) S.premTo = S.premFrom; render(); } };
   $("premTo").onchange = e => { if (e.target.value) { S.premTo = e.target.value; if (S.premTo < S.premFrom) S.premFrom = S.premTo; render(); } };
+  $("premModeSeg").onclick = e => { const v = e.target.dataset.mode; if (!v) return; S.premMode = v; render(); };
   $("premThr").onchange = e => { S.premThr = Math.max(0, +e.target.value || 0); render(); };
   $("endMonthSel").onchange = e => { S.endMonth = e.target.value; render(); };
   $("anMetricSeg").onclick = e => { const v = e.target.dataset.metric; if (!v) return; S.anMetric = v; segOn("anMetricSeg", "metric", v); render(); };
