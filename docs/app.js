@@ -477,11 +477,16 @@ async function renderPeriod() {
     });
   });
   const months = Object.keys(byM).sort().reverse();
+  // месяц неполный, если окно периода (или имеющиеся данные) покрывает не все его дни
+  const nDays = {};
+  dates.forEach((d, i) => { if (zs.some(z => daily[z][i].n)) { const m = d.slice(0, 7); nDays[m] = (nDays[m] || 0) + 1; } });
+  const partial = m => (nDays[m] || 0) < daysOfMonth(m).length;
+  $("monthNote").textContent = months.some(partial) ? t("partialMonth") : "";
   const avg = a => a[1] ? nf(a[0] / a[1]) : "—";
   let html = `<thead><tr><th rowspan="2">${t("month")}</th>${zs.map(z => `<th colspan="3" class="grp">${z}</th>`).join("")}</tr>
     <tr>${zs.map(() => "<th>Base</th><th>Peak</th><th>Off-peak</th>").join("")}</tr></thead><tbody>`;
   months.forEach(m => {
-    html += `<tr><td class="grp">${m}</td>` + zs.map(z => {
+    html += `<tr><td class="grp">${m}${partial(m) ? "*" : ""}</td>` + zs.map(z => {
       const o = byM[m][z];
       return o ? `<td><b>${avg(o.all)}</b></td><td>${avg(o.pk)}</td><td>${avg(o.op)}</td>` : "<td>—</td><td>—</td><td>—</td>";
     }).join("") + "</tr>";
