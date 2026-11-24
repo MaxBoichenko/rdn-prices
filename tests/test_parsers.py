@@ -59,38 +59,46 @@ def test_entsoe_ack():
     assert series == {} and cur is None
 
 
-OREE_HTML = """
-<table><tr><th>Година</th><th>Ціна, грн/МВт·год</th><th>Обсяг</th></tr>
-<tr><td>1</td><td>4 520,10</td><td>1000</td></tr>
-<tr><td>2</td><td>4&nbsp;300,00</td><td>900</td></tr>
-<tr><td>24</td><td>6000</td><td>900</td></tr>
-<tr><td>Base</td><td>5000</td><td></td></tr>
-</table>"""
-
-OREE_HTML_RANGE = "<tr><td>00-01</td><td>1000</td></tr><tr><td>23-24</td><td>2000</td></tr>"
-
-
-def test_oree_parse():
-    p = fp.parse_oree_html(OREE_HTML)
-    assert p == {1: 4520.10, 2: 4300.0, 24: 6000.0}
-    p2 = fp.parse_oree_html(OREE_HTML_RANGE)
-    assert p2 == {1: 1000.0, 24: 2000.0}
+def _dsap(n_prev, n_day, price0=1000.0):
+    """Ответ ОРЕЕ DSAP: подряд часы предыдущих суток и суток d."""
+    n = n_prev + n_day
+    return {
+        "price": [price0 + i for i in range(n)],
+        "buy": [10.0] * n,
+        "sell": [20.0] * n,
+        "accepted_volume": [5.0] * n,
+    }
 
 
-def test_oree_timezone(monkeypatch):
-    monkeypatch.setattr(fp, "nbu_eur_rate", lambda d: 50.0)
+def test_oree_dsap_normal_day():
+    out = fp.parse_oree_dsap(_dsap(24, 24), date(2026, 11, 23))
+    assert len(out) == 24
+    # час 1 по Киеву (UTC+2 зимой) = 22:00 UTC предыдущих суток; берутся значения суток d
+    assert out[U("2026-11-22T22:00Z")] == {"price": 1024.0, "buy": 10.0, "sell": 20.0, "accepted": 5.0}
+    assert out[U("2026-11-23T21:00Z")]["price"] == 1047.0
 
-    class R:
-        text = OREE_HTML
 
-        def json(self):
-            raise ValueError
+def test_oree_dsap_spring_dst():
+    # 29.03.2026 по Киеву 23 часа, ОРЕЕ всё равно даёт 24 значения; 4-е значение выбрасывается
+    out = fp.parse_oree_dsap(_dsap(24, 24), date(2026, 3, 29))
+    assert len(out) == 23
+    assert out[U("2026-03-28T22:00Z")]["price"] == 1024.0
+    assert out[U("2026-03-29T01:00Z")]["price"] == 1028.0
+    assert out[U("2026-03-29T20:00Z")]["price"] == 1047.0
 
-    monkeypatch.setattr(fp, "http", lambda *a, **k: R())
-    out = fp.fetch_oree_day(date(2026, 11, 23))
-    # час 1 по Киеву (UTC+2 зимой) = 22:00 UTC предыдущих суток
-    assert out[U("2026-11-22T22:00Z")] == round(4520.10 / 50, 2)
-    assert out[U("2026-11-23T21:00Z")] == 120.0
+
+def test_oree_dsap_autumn_dst():
+    out = fp.parse_oree_dsap(_dsap(24, 25), date(2026, 10, 25))
+    assert len(out) == 25
+    assert out[U("2026-10-24T21:00Z")]["price"] == 1024.0
+    assert out[U("2026-10-25T21:00Z")]["price"] == 1048.0
+
+
+def test_oree_dsap_empty_or_bad():
+    assert fp.parse_oree_dsap({}, date(2026, 11, 23)) == {}
+    assert fp.parse_oree_dsap(_dsap(24, 20), date(2026, 11, 23)) == {}      # неожиданная длина
+    zeros = {k: [0] * 48 for k in ("price", "buy", "sell", "accepted_volume")}
+    assert fp.parse_oree_dsap(zeros, date(2026, 11, 23)) == {}             # данных за день ещё нет
 
 
 A11 = """<GL_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-6:generationloaddocument:3:0">
